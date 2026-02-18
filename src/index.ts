@@ -7,6 +7,7 @@ import * as dotenv from "dotenv";
 import authRoutes from "./api/auth/auth.routes";
 import projectsRoutes from "./api/projects/projects.routes";
 import ChatRoutes from "./api/chat/chat.routes";
+import githubRoutes from "./api/github/github.routes";
 
 dotenv.config();
 
@@ -29,6 +30,7 @@ app.use(express.json());
 app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectsRoutes);
 app.use("/api/chat", ChatRoutes);
+app.use("/api/github", githubRoutes);
 app.get("/", (req: Request, res: Response) => {
   res.json({
     status: "success",

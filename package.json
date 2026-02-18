@@ -28,6 +28,8 @@
     "jsonwebtoken": "^9.0.3",
     "langchain": "^1.2.21",
     "morgan": "^1.10.1",
+    "octokit": "^5.0.5",
+    "react-diff-viewer-continued": "^4.1.2",
     "simple-git": "^3.30.0"
   },
   "devDependencies": {

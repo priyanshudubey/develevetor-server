@@ -6,7 +6,10 @@ import { supabase } from "../../config/supabase";
 // --- 1. Initiate Login ---
 // Redirects the user to GitHub's consent screen
 export const login = (req: Request, res: Response) => {
-  const redirectUri = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=user:email`;
+  const scopes = "user:email repo";
+
+  const redirectUri = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=${encodeURIComponent(scopes)}`;
+
   res.redirect(redirectUri);
 };
 

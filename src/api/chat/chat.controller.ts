@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
-import { OpenAI } from "openai";
+import { OpenAI } from "openai"; // Ensure this matches your export
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // 1. GET CHAT HISTORY
 export const getChatHistory = async (
@@ -27,59 +29,174 @@ export const getChatHistory = async (
   }
 };
 
+// --- HELPER: Generate ASCII Tree ---
+const generateFileTree = (paths: string[]) => {
+  const tree: any = {};
+
+  // 1. Build the object structure
+  paths.forEach((path) => {
+    const parts = path.split("/");
+    let current = tree;
+    parts.forEach((part) => {
+      if (!current[part]) current[part] = {};
+      current = current[part];
+    });
+  });
+
+  // 2. Recursive function to print the tree string
+  const buildString = (node: any, prefix = "") => {
+    let result = "";
+    const keys = Object.keys(node).sort(); // Sort for consistency
+
+    keys.forEach((key, index) => {
+      const isLast = index === keys.length - 1;
+      const connector = isLast ? "└── " : "├── ";
+      const childPrefix = isLast ? "    " : "│   ";
+
+      const isFile = Object.keys(node[key]).length === 0;
+
+      result += `${prefix}${connector}${key}\n`;
+
+      if (!isFile) {
+        result += buildString(node[key], prefix + childPrefix);
+      }
+    });
+    return result;
+  };
+
+  return buildString(tree);
+};
+
+// 2. CHAT WITH PROJECT (RAG + Context Injection)
 export const chatWithProject = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
-  const { projectId, message } = req.body;
-  const userId = (req as any).user.id;
+  const { projectId, message, selectedFiles } = req.body;
 
   try {
+    // 1. Save USER message immediately
     await supabase.from("chat_messages").insert({
       project_id: projectId,
       role: "user",
       content: message,
     });
-    // 1. Generate Embedding for the User's Question
+
+    // --- STEP A: Fetch File Map (The "Brain") ---
+    const { data: filePaths } = await supabase
+      .from("documents")
+      .select("metadata->>path")
+      .eq("project_id", projectId)
+      .limit(2000);
+
+    const allPaths = filePaths ? filePaths.map((f: any) => f.path) : [];
+
+    // Use the Tree Generator for better AI understanding
+    const fileStructure =
+      allPaths.length > 0 ? generateFileTree(allPaths) : "(No files found)";
+
+    // --- STEP B: Resolve "Context Files" ---
+    // Priority: Selected > Core (package.json) > Vector
+
+    let targetPaths: string[] = [];
+
+    // 1. Explicit Selection
+    if (selectedFiles && selectedFiles.length > 0) {
+      targetPaths.push(...selectedFiles);
+    }
+
+    // 2. Implicit Core Files (Only if explicit context is low)
+    // Always try to include package.json or main entries if user didn't select many files
+    if (targetPaths.length < 3) {
+      const corePatterns = [
+        "package.json",
+        "tsconfig.json",
+        "src/index",
+        "src/App",
+        "src/main",
+        "server.ts",
+        "main.go",
+      ];
+      // Find paths that fuzzy match core patterns
+      const corePaths = allPaths
+        .filter((p) => corePatterns.some((core) => p.includes(core)))
+        .slice(0, 3);
+
+      targetPaths.push(...corePaths);
+    }
+
+    // Deduplicate paths before fetching
+    targetPaths = [...new Set(targetPaths)];
+
+    // Fetch Content for these Target Files
+    let explicitDocs: any[] = [];
+    if (targetPaths.length > 0) {
+      const { data } = await supabase
+        .from("documents")
+        .select("content, metadata")
+        .eq("project_id", projectId)
+        .in("metadata->>path", targetPaths);
+      explicitDocs = data || [];
+    }
+
+    // --- STEP C: Vector Search (The "Specifics") ---
     const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: message,
     });
     const queryVector = embeddingResponse?.data[0]?.embedding;
 
-    // 2. Search Supabase for similar code chunks (RAG)
-    const { data: documents, error } = await supabase.rpc("match_documents", {
+    const { data: vectorDocs } = await supabase.rpc("match_documents", {
       query_embedding: queryVector,
-      match_threshold: 0.1, // Similarity threshold (0-1)
-      match_count: 5, // Top 5 most relevant chunks
+      match_threshold: 0.1, // Loose threshold to catch more potential matches
+      match_count: 5,
       filter_project_id: projectId,
     });
 
-    if (error) throw error;
-    console.log(`Query: "${message}"`);
-    console.log(`Found ${documents?.length || 0} chunks.`);
+    // --- STEP D: Combine & Deduplicate Context ---
+    const allDocs = [...explicitDocs, ...(vectorDocs || [])];
 
-    // 3. Construct the Context Window
-    // We combine the code chunks into a single string
-    const contextText = documents
-      ?.map(
-        (doc: any) => `File: ${doc.metadata.path}\nContent:\n${doc.content}`,
-      )
-      .join("\n\n---\n\n");
+    // Deduplicate docs by path (Video Search might find same file as Core)
+    const uniqueDocsMap = new Map();
+    allDocs.forEach((doc) => uniqueDocsMap.set(doc.metadata.path, doc));
+    const uniqueDocs = Array.from(uniqueDocsMap.values());
+
+    // Prepare Sources Header
+    const sources = uniqueDocs.map((d: any) => d.metadata.path);
+
+    // Send Headers BEFORE streaming
+    res.setHeader("Content-Type", "text/plain");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("x-sources", JSON.stringify(sources));
+
+    // Build the Context String
+    const contextText = uniqueDocs
+      .map((doc: any) => `\n--- FILE: ${doc.metadata.path} ---\n${doc.content}`)
+      .join("\n");
 
     const systemPrompt = `
-You are an expert AI software engineer. You are answering a question about a specific codebase.
-Use the provided Context below to answer the user's question. 
-If the answer isn't in the context, say "I don't see that in the provided code."
-Always reference filenames when explaining code.
+You are an expert Senior Software Engineer.
+You have a full map of the codebase and access to specific file contents.
 
-CONTEXT:
+**PROJECT ARCHITECTURE (File Tree):**
+${fileStructure}
+
+**AVAILABLE CODE CONTEXT:**
 ${contextText}
-    `;
 
-    // 4. Call GPT-4 to generate the answer
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o", // Or gpt-3.5-turbo if you want to save money
+**INSTRUCTIONS:**
+1. **Analyze the Tree:** Use the "File Tree" to understand the project structure (e.g., "I see a /routes folder, so this is likely an Express app").
+2. **Use the Context:** Answer the user's question using the provided "Code Context".
+3. **Be Honest:** If the answer requires a file that is in the "Tree" but NOT in the "Context", say: "I see a file named 'src/utils/auth.ts' in the tree which likely contains the answer. Could you select that file?"
+4. **Assume React/Node unless seen otherwise.**
+5. **Keep answers concise and code-focused.**
+
+IMPORTANT: When generating code for a specific file, ALWAYS start the code block with a comment specifying the full file path, like this: // File: src/components/App.tsx or # File: scripts/deploy.py.
+`;
+
+    // --- STEP E: Stream Response ---
+    const stream = await openai.chat.completions.create({
+      model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: message },
@@ -89,15 +206,15 @@ ${contextText}
 
     let fullAnswer = "";
 
-    // 6. Pipe chunks to Client
-    for await (const chunk of completion) {
+    for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content || "";
       if (text) {
         res.write(text);
         fullAnswer += text;
       }
     }
-    const sources = documents?.map((d: any) => d.metadata.path) || [];
+
+    // Save Assistant Message
     await supabase.from("chat_messages").insert({
       project_id: projectId,
       role: "assistant",
@@ -105,10 +222,13 @@ ${contextText}
       sources: sources,
     });
 
-    // 5. Return the answer
     res.end();
   } catch (error) {
     console.error("Chat Error:", error);
-    res.status(500).json({ error: "Failed to generate answer" });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate answer" });
+    } else {
+      res.end();
+    }
   }
 };

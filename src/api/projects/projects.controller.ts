@@ -201,3 +201,131 @@ export const deleteProject = async (
     res.status(500).json({ error: "Failed to delete project" });
   }
 };
+
+//4. Search Files in the Project
+export const getProjectFiles = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { id } = req.params;
+  const { query } = req.query; // e.g. ?query=src/
+
+  try {
+    // 👇 CHANGED: We now use the Postgres RPC function for scalable search.
+    // This allows searching 10,000+ files instantly without fetching them all to the server.
+    const { data, error } = await supabase.rpc("search_project_files", {
+      target_project_id: id,
+      search_query: query ? String(query) : "", // Pass empty string if no query
+    });
+
+    if (error) {
+      console.error("RPC Search Error:", error);
+      throw error;
+    }
+
+    // The RPC function returns an array of objects: [{ file_path: "src/App.tsx" }, ...]
+    // We map it to a simple array of strings: ["src/App.tsx", ...]
+    const files = data.map((row: any) => row.file_path);
+
+    res.json({ files });
+  } catch (error) {
+    console.error("Search Files Error:", error);
+    res.status(500).json({ error: "Failed to search files" });
+  }
+};
+
+export const getFileContent = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { id } = req.params;
+  const { path } = req.query;
+  const userId = (req as any).user.id;
+
+  if (!path || typeof path !== "string") {
+    res.status(400).json({ error: "Path is required" });
+    return;
+  }
+
+  // 1. Prepare Path Variations
+  // Web/GitHub expects: "src/api/file.ts"
+  const cleanPath = path.replace(/\\/g, "/");
+  // Windows DB might have: "src\api\file.ts" (Double backslash for JS string)
+  const windowsPath = cleanPath.replace(/\//g, "\\");
+
+  try {
+    // 2. Get Project Details
+    // 👇 CHANGED: specific columns 'url' instead of 'github_url'
+    const { data: project } = await supabase
+      .from("projects")
+      .select("url, is_private")
+      .eq("id", id)
+      .eq("user_id", userId) // Security check back in
+      .maybeSingle();
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+
+    // 3. Try GitHub Fetch (The "Live" version)
+    // We check project.url now
+    let githubSuccess = false;
+    if (project.url) {
+      try {
+        const parts = project.url.split("/");
+        const owner = parts[parts.length - 2];
+        const repo = parts[parts.length - 1].replace(".git", "");
+
+        const githubApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${cleanPath}`;
+
+        const headers: any = {
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "DevElevator-App",
+        };
+
+        // If private, add token (if you have one in env)
+        if (project.is_private && process.env.GITHUB_ACCESS_TOKEN) {
+          headers.Authorization = `token ${process.env.GITHUB_ACCESS_TOKEN}`;
+        }
+
+        const response = await axios.get(githubApiUrl, { headers });
+
+        if (response.data.content) {
+          const content = Buffer.from(response.data.content, "base64").toString(
+            "utf-8",
+          );
+          res.json({ content });
+          githubSuccess = true;
+          return;
+        }
+      } catch (ghError: any) {
+        console.warn(`[GitHub] Fetch failed: ${ghError.message}`);
+      }
+    }
+
+    // 4. Fallback: Search Supabase Index (The "Indexed" version)
+    if (!githubSuccess) {
+      console.log("[Fallback] Searching DB for content...");
+
+      // Match standard path OR Windows path
+      const { data: dbDoc } = await supabase
+        .from("documents")
+        .select("content")
+        .eq("project_id", id)
+        // We use .or() to check both path styles
+        .or(`metadata->>path.eq.${cleanPath},metadata->>path.eq.${windowsPath}`)
+        .limit(1)
+        .maybeSingle();
+
+      if (dbDoc) {
+        res.json({ content: `(Offline Copy)\n\n${dbDoc.content}` });
+      } else {
+        res.status(404).json({ error: "File content not found" });
+      }
+    }
+  } catch (error: any) {
+    console.error("[FileView] Error:", error.message);
+    res.status(500).json({ error: "Server error retrieving file" });
+  }
+};
