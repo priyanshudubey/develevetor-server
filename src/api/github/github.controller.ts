@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
 import { GitHubService } from "../../services/github.service";
+import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 
-// 👇 FIX: Explicit return type guarantees strings, not undefined
 const parseGitHubUrl = (
   url: string,
 ): { owner: string; repo: string } | null => {
@@ -14,8 +14,7 @@ const parseGitHubUrl = (
     if (parts.length < 2) return null;
 
     const owner = parts[0];
-    const repo = parts[1]?.replace(".git", ""); // Remove .git if present
-
+    const repo = parts[1]?.replace(".git", "");
     // Validate they are not empty strings
     if (!owner || !repo) return null;
 
@@ -83,7 +82,6 @@ export const createPullRequest = async (
       return;
     }
 
-    // 👇 TypeScript now knows these are strictly 'string'
     const { owner, repo } = repoDetails;
     const baseBranch = "main";
 
@@ -128,7 +126,10 @@ export const createPullRequest = async (
       base: baseBranch,
     });
 
-    // 6. Success
+    // 6. Increment usage
+    await incrementUsage(user.id, "pr");
+
+    // 7. Success
     res.json({ success: true, prUrl });
   } catch (error: any) {
     console.error("PR Controller Error:", error);

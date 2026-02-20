@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import axios from "axios";
 import { supabase } from "../../config/supabase";
 import { indexerService } from "../../services/indexer.service";
+import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 
 // 1. List User's Repos from GitHub (for the selection modal)
 export const listGithubRepos = async (
@@ -114,7 +115,32 @@ export const createProject = async (
   const { repoId, name, url, isPrivate } = req.body;
 
   try {
-    // A. Insert Project into DB
+    // .single() throws an error if it finds 0 rows. .maybeSingle() safely returns null.
+    const { data: existingProject } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("github_repo_id", repoId.toString())
+      .maybeSingle();
+
+    if (existingProject) {
+      // It exists! Just un-archive it. Zero AI cost.
+      const { data: restoredProject, error: restoreError } = await supabase
+        .from("projects")
+        .update({ status: "READY", name })
+        .eq("id", existingProject.id)
+        .select()
+        .single();
+
+      if (restoreError) throw restoreError;
+
+      // Increment limits, but NO indexing needed because we kept the documents!
+      await incrementUsage(userId, "project_create");
+      res.json({ project: restoredProject, restoredFromCache: true });
+      return;
+    }
+
+    // A. Insert Brand New Project into DB
     const { data: project, error } = await supabase
       .from("projects")
       .insert({
@@ -123,14 +149,16 @@ export const createProject = async (
         name,
         url,
         is_private: isPrivate,
-        status: "INDEXING", // Set immediately to INDEXING
+        status: "INDEXING",
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    // B. Send Response to Client immediately (Don't wait for indexing)
+    await incrementUsage(userId, "project_create");
+
+    // B. Send Response to Client immediately
     res.json({ project });
 
     // C. Get GitHub Token for Cloning
@@ -141,8 +169,7 @@ export const createProject = async (
       .single();
 
     if (user?.github_token) {
-      // D. Trigger Background Indexing
-      // We do NOT await this, so the UI doesn't freeze
+      // D. Trigger Background Indexing (Only runs for truly new projects)
       indexerService
         .processProject(project.id, url, user.github_token)
         .catch((err) => console.error("Background indexing failed:", err));
@@ -164,6 +191,7 @@ export const getMyProjects = async (
     .from("projects")
     .select("*")
     .eq("user_id", userId)
+    .neq("status", "ARCHIVED")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -182,16 +210,11 @@ export const deleteProject = async (
   const userId = (req as any).user.id;
 
   try {
-    // 1. Delete Vectors (The "Brain" of the project)
-    // We explicitly delete these to ensure no "phantom" search results remain.
-    await supabase.from("documents").delete().eq("project_id", id);
-
-    // 2. Delete the Project (Cascade will handle chat_messages automatically)
     const { error } = await supabase
       .from("projects")
-      .delete()
+      .update({ status: "ARCHIVED" })
       .eq("id", id)
-      .eq("user_id", userId); // Security: Ensure user owns the project
+      .eq("user_id", userId);
 
     if (error) throw error;
 

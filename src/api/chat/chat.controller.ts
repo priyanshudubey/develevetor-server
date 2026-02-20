@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
 import { OpenAI } from "openai"; // Ensure this matches your export
+import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -73,8 +74,14 @@ export const chatWithProject = async (
   res: Response,
 ): Promise<void> => {
   const { projectId, message, selectedFiles } = req.body;
+  const userId = (req as any).user?.id;
 
   try {
+    // 0. Increment usage before stream starts
+    if (userId) {
+      await incrementUsage(userId, "chat");
+    }
+
     // 1. Save USER message immediately
     await supabase.from("chat_messages").insert({
       project_id: projectId,
@@ -190,6 +197,13 @@ ${contextText}
 3. **Be Honest:** If the answer requires a file that is in the "Tree" but NOT in the "Context", say: "I see a file named 'src/utils/auth.ts' in the tree which likely contains the answer. Could you select that file?"
 4. **Assume React/Node unless seen otherwise.**
 5. **Keep answers concise and code-focused.**
+6. **FILE TREES:** You MUST wrap file trees in a markdown code block using the 'text' language. 
+EXPECTED FORMAT:
+\`\`\`text
+├── src/
+│   └── index.js
+\`\`\`
+NEVER output a file tree as plain text.
 
 IMPORTANT: When generating code for a specific file, ALWAYS start the code block with a comment specifying the full file path, like this: // File: src/components/App.tsx or # File: scripts/deploy.py.
 `;
