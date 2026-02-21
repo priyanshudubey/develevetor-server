@@ -3,6 +3,55 @@ import { supabase } from "../../config/supabase";
 import { GitHubService } from "../../services/github.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 
+import { OpenAI } from "openai";
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Helper to extract raw code from an LLM markdown response
+const extractRawCode = (llmResponse: string = ""): string => {
+  if (!llmResponse) return "";
+
+  const codeBlockRegex = /```[\w]*\n([\s\S]*?)```/;
+  const match = llmResponse.match(codeBlockRegex);
+
+  return match?.[1] ? match[1].trim() : llmResponse.trim();
+};
+
+// The Hidden Agent
+const performHiddenMerge = async (
+  originalCode: string,
+  newSnippet: string,
+): Promise<string> => {
+  const mergePrompt = `
+You are an expert code integration agent. 
+I will provide you with the ORIGINAL FILE CONTENT and a NEW CODE SNIPPET.
+Your task is to figure out exactly where the new snippet belongs in the original file, replace the old logic, and return the ENTIRE, fully updated file.
+
+CRITICAL RULES - READ CAREFULLY:
+1. You MUST return the COMPLETE file code from line 1 to the final line. 
+2. ABSOLUTELY NO PLACEHOLDERS. Do not use comments like "// ... rest of the code ...", "// unchanged", or "/* previous code */". You must type out every single line of the original code.
+3. If the original file has 300 lines, your output MUST have at least 300 lines.
+4. Do not include any explanations, greetings, or conversational text. Output ONLY the raw code.
+
+=== ORIGINAL FILE CONTENT ===
+${originalCode}
+
+=== NEW SNIPPET TO INTEGRATE ===
+${newSnippet}
+  `;
+
+  // Use gpt-4o-mini for this. It is extremely fast, cheap, and perfect for strict formatting tasks.
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: mergePrompt }],
+    temperature: 0.1, // Low temperature ensures it doesn't hallucinate extra code
+  });
+
+  const rawLlmText = response?.choices[0]?.message.content || "";
+  return extractRawCode(rawLlmText);
+};
+
 const parseGitHubUrl = (
   url: string,
 ): { owner: string; repo: string } | null => {
@@ -10,12 +59,11 @@ const parseGitHubUrl = (
     const cleanUrl = url.replace("https://github.com/", "");
     const parts = cleanUrl.split("/");
 
-    // We need at least owner and repo parts
     if (parts.length < 2) return null;
 
     const owner = parts[0];
     const repo = parts[1]?.replace(".git", "");
-    // Validate they are not empty strings
+
     if (!owner || !repo) return null;
 
     return { owner, repo };
@@ -31,7 +79,7 @@ export const createPullRequest = async (
   const {
     projectId,
     filePath,
-    newContent,
+    newContent, // This is the AI Snippet from the frontend
     prTitle,
     prDescription,
     branchName,
@@ -73,7 +121,6 @@ export const createPullRequest = async (
       return;
     }
 
-    // Parse owner/repo
     const repoDetails = parseGitHubUrl(project.url);
     if (!repoDetails) {
       res
@@ -85,13 +132,38 @@ export const createPullRequest = async (
     const { owner, repo } = repoDetails;
     const baseBranch = "main";
 
-    // 4. SAFETY CHECK: Fetch latest file SHA
+    // 4. THE MERGE PIPELINE: Fetch existing file & merge
     let currentSha: string | undefined;
+    let fullyMergedFileContent = newContent; // Default to the snippet (in case it's a brand new file)
+
     try {
       const currentFile = await ghService.getFile(owner, repo, filePath);
       currentSha = currentFile.sha;
+
+      // If the file exists, GitHub returns base64 content. We decode it, then merge it.
+      if (currentFile.content) {
+        console.log(
+          `[PR Workflow] Existing file found. Merging snippet invisibly...`,
+        );
+        const originalFileContent = currentFile.content;
+
+        console.log(
+          `[PR Workflow] Original File Lines: ${originalFileContent.split("\n").length}`,
+        );
+
+        // Let the AI merge the snippet into the full 300-line file
+        fullyMergedFileContent = await performHiddenMerge(
+          originalFileContent,
+          newContent,
+        );
+        console.log(
+          `[PR Workflow] Merged File Lines: ${fullyMergedFileContent.split("\n").length}`,
+        );
+      }
     } catch (e) {
-      console.log(`File ${filePath} not found, will create new.`);
+      console.log(
+        `[PR Workflow] File ${filePath} not found. Creating as a new file.`,
+      );
     }
 
     // 5. Execution Pipeline
@@ -109,11 +181,10 @@ export const createPullRequest = async (
       repo,
       path: filePath,
       branch: branchName,
-      content: newContent,
+      // Pass the FULLY MERGED content here, not just the snippet
+      content: fullyMergedFileContent,
       message: prTitle,
       sha: currentSha || "",
-      // Note: If creating a NEW file, GitHub ignores the empty SHA.
-      // If updating, the SHA must match.
     });
 
     // C. Open the Pull Request

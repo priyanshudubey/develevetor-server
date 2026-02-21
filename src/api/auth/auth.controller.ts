@@ -139,3 +139,75 @@ export const logout = (req: Request, res: Response) => {
   res.clearCookie("auth_token");
   res.json({ success: true });
 };
+
+export const getUserUsage = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const userId = (req as any).user?.id;
+
+  try {
+    let { data: usage, error } = await supabase
+      .from("user_usage")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    // Self-Healing: If no row exists, create one
+    if (!usage) {
+      const { data: newUsage, error: insertError } = await supabase
+        .from("user_usage")
+        .insert([{ user_id: userId }])
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+      usage = newUsage;
+    }
+
+    // Check for 24h reset
+    const now = new Date();
+    const lastReset = new Date(usage.last_reset_at);
+    const oneDay = 24 * 60 * 60 * 1000;
+
+    if (now.getTime() - lastReset.getTime() > oneDay) {
+      const { data: resetData, error: resetError } = await supabase
+        .from("user_usage")
+        .update({
+          chat_count: 0,
+          pr_count: 0,
+          project_create_count: 0,
+          last_reset_at: now.toISOString(),
+        })
+        .eq("user_id", userId)
+        .select()
+        .single();
+
+      if (!resetError) usage = resetData;
+    }
+
+    // Calculate the next reset time to send to the frontend
+    const nextResetTime = new Date(
+      new Date(usage.last_reset_at).getTime() + oneDay,
+    );
+
+    res.json({
+      usage: {
+        chats: usage.chat_count,
+        prs: usage.pr_count,
+        projectCreates: usage.project_create_count,
+      },
+      limits: {
+        chats: 15,
+        prs: 3,
+        projectCreates: 2,
+      },
+      resetAt: nextResetTime.toISOString(),
+    });
+  } catch (err) {
+    console.error("Get usage error:", err);
+    res.status(500).json({ error: "Failed to fetch usage limits" });
+  }
+};
