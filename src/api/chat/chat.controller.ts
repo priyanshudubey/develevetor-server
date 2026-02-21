@@ -239,10 +239,11 @@ IMPORTANT: When generating code for a specific file, ALWAYS start the code block
     res.end();
   } catch (error) {
     console.error("Chat Error:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate answer" });
-    } else {
-      res.end();
+    // If you can differentiate errors:
+    let errorMessage = "An unexpected error occurred.";
+    if (error instanceof SomeSpecificError) {
+      errorMessage = "Detail specific to the error encountered.";
     }
+    res.status(500).json({ error: errorMessage });
   }
 };
