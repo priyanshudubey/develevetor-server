@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
 import { GitHubService } from "../../services/github.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
+import { decryptToken } from "../../utils/crypto.util";
 
 import { OpenAI } from "openai";
 import { logger } from "../../config/logger";
@@ -94,23 +95,30 @@ export const createPullRequest = async (
   }
 
   try {
-    // 2. Get User's GitHub Token
-    const { data: userData } = await supabase
-      .from("users")
+    // 2. THE VAULT EXTRACTION
+    // Fetch the encrypted token from the new isolated integrations table
+    const { data: integrationData } = await supabase
+      .from("user_integrations")
       .select("github_token")
-      .eq("id", user.id)
+      .eq("user_id", user.id)
       .single();
 
-    if (!userData?.github_token) {
+    if (!integrationData?.github_token) {
       res.status(403).json({
-        error: "GitHub write permission required. Please log in again.",
+        error:
+          "GitHub write permission required. Please connect your account in Settings.",
       });
       return;
     }
 
-    const ghService = new GitHubService(userData.github_token);
+    // 3. THE DECRYPTION
+    // Unlock the token in server memory so it can be used for this specific request
+    const decryptedToken = decryptToken(integrationData.github_token);
 
-    // 3. Get Project URL
+    // Initialize the GitHub service acting explicitly on behalf of THIS user
+    const ghService = new GitHubService(decryptedToken);
+
+    // 4. Get Project URL
     const { data: project } = await supabase
       .from("projects")
       .select("url")
@@ -131,9 +139,9 @@ export const createPullRequest = async (
     }
 
     const { owner, repo } = repoDetails;
-    const baseBranch = "main";
+    const baseBranch = "main"; // Or dynamically fetch from user_preferences if you added that!
 
-    // 4. THE MERGE PIPELINE: Fetch existing file & merge
+    // 5. THE MERGE PIPELINE: Fetch existing file & merge
     let currentSha: string | undefined;
     let fullyMergedFileContent = newContent;
 
@@ -141,28 +149,18 @@ export const createPullRequest = async (
       const currentFile = await ghService.getFile(owner, repo, filePath);
       currentSha = currentFile.sha;
 
-      // If the file exists, GitHub returns base64 content. We decode it, then merge it.
       if (currentFile.content) {
         logger.info(
           `[PR Workflow] Existing file found. Merging snippet invisibly...`,
-          {
-            filePath,
-            projectId,
-          },
+          { filePath, projectId },
         );
         const originalFileContent = currentFile.content;
 
-        logger.info(`[PR Workflow] Original File Lines: `, {
-          lines: originalFileContent.split("\n").length,
-          filePath,
-          projectId,
-        });
-
-        // Let the AI merge the snippet into the full 300-line file
         fullyMergedFileContent = await performHiddenMerge(
           originalFileContent,
           newContent,
         );
+
         logger.info(
           `[PR Workflow] Merged File Lines: ${fullyMergedFileContent.split("\n").length}`,
           { filePath, projectId },
@@ -175,7 +173,7 @@ export const createPullRequest = async (
       );
     }
 
-    // 5. Execution Pipeline
+    // 6. Execution Pipeline
 
     // A. Create Branch
     try {
@@ -193,7 +191,6 @@ export const createPullRequest = async (
       repo,
       path: filePath,
       branch: branchName,
-      // Pass the FULLY MERGED content here, not just the snippet
       content: fullyMergedFileContent,
       message: prTitle,
       sha: currentSha || "",
@@ -209,10 +206,10 @@ export const createPullRequest = async (
       base: baseBranch,
     });
 
-    // 6. Increment usage
+    // 7. Increment usage
     await incrementUsage(user.id, "pr");
 
-    // 7. Success
+    // 8. Success
     res.json({ success: true, prUrl });
   } catch (error: any) {
     logger.error("PR Controller Error:", {

@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
-import { OpenAI } from "openai"; // Ensure this matches your export
+import { OpenAI } from "openai";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 import { logger } from "../../config/logger";
 
@@ -73,6 +73,8 @@ const generateFileTree = (paths: string[]) => {
 };
 
 // 2. CHAT WITH PROJECT (RAG + Context Injection)
+// ... your existing imports and generateFileTree helper ...
+
 export const chatWithProject = async (
   req: Request,
   res: Response,
@@ -84,6 +86,25 @@ export const chatWithProject = async (
     // 0. Increment usage before stream starts
     if (userId) {
       await incrementUsage(userId, "chat");
+    }
+
+    // 🆕 FETCH USER PREFERENCES (Defaults applied if not found)
+    let userModel = "gpt-4o";
+    let userTemperature = 0.3;
+    let userInstructions = "";
+
+    if (userId) {
+      const { data: prefs } = await supabase
+        .from("user_preferences")
+        .select("ai_model, ai_temperature, ai_instructions")
+        .eq("user_id", userId)
+        .single();
+
+      if (prefs) {
+        userModel = prefs.ai_model || "gpt-4o";
+        userTemperature = Number(prefs.ai_temperature) ?? 0.3;
+        userInstructions = prefs.ai_instructions || "";
+      }
     }
 
     // 1. Save USER message immediately
@@ -101,23 +122,14 @@ export const chatWithProject = async (
       .limit(2000);
 
     const allPaths = filePaths ? filePaths.map((f: any) => f.path) : [];
-
-    // Use the Tree Generator for better AI understanding
     const fileStructure =
       allPaths.length > 0 ? generateFileTree(allPaths) : "(No files found)";
 
     // --- STEP B: Resolve "Context Files" ---
-    // Priority: Selected > Core (package.json) > Vector
-
     let targetPaths: string[] = [];
-
-    // 1. Explicit Selection
     if (selectedFiles && selectedFiles.length > 0) {
       targetPaths.push(...selectedFiles);
     }
-
-    // 2. Implicit Core Files (Only if explicit context is low)
-    // Always try to include package.json or main entries if user didn't select many files
     if (targetPaths.length < 3) {
       const corePatterns = [
         "package.json",
@@ -128,18 +140,13 @@ export const chatWithProject = async (
         "server.ts",
         "main.go",
       ];
-      // Find paths that fuzzy match core patterns
       const corePaths = allPaths
         .filter((p) => corePatterns.some((core) => p.includes(core)))
         .slice(0, 3);
-
       targetPaths.push(...corePaths);
     }
-
-    // Deduplicate paths before fetching
     targetPaths = [...new Set(targetPaths)];
 
-    // Fetch Content for these Target Files
     let explicitDocs: any[] = [];
     if (targetPaths.length > 0) {
       const { data } = await supabase
@@ -151,6 +158,7 @@ export const chatWithProject = async (
     }
 
     // --- STEP C: Vector Search (The "Specifics") ---
+    // 🆕 Use a lightweight model for embeddings to save money, regardless of what the user selected for chat
     const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: message,
@@ -159,32 +167,28 @@ export const chatWithProject = async (
 
     const { data: vectorDocs } = await supabase.rpc("match_documents", {
       query_embedding: queryVector,
-      match_threshold: 0.1, // Loose threshold to catch more potential matches
+      match_threshold: 0.1,
       match_count: 5,
       filter_project_id: projectId,
     });
 
     // --- STEP D: Combine & Deduplicate Context ---
     const allDocs = [...explicitDocs, ...(vectorDocs || [])];
-
-    // Deduplicate docs by path (Video Search might find same file as Core)
     const uniqueDocsMap = new Map();
     allDocs.forEach((doc) => uniqueDocsMap.set(doc.metadata.path, doc));
     const uniqueDocs = Array.from(uniqueDocsMap.values());
 
-    // Prepare Sources Header
     const sources = uniqueDocs.map((d: any) => d.metadata.path);
 
-    // Send Headers BEFORE streaming
     res.setHeader("Content-Type", "text/plain");
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("x-sources", JSON.stringify(sources));
 
-    // Build the Context String
     const contextText = uniqueDocs
       .map((doc: any) => `\n--- FILE: ${doc.metadata.path} ---\n${doc.content}`)
       .join("\n");
 
+    // 🆕 INJECT USER INSTRUCTIONS INTO SYSTEM PROMPT
     const systemPrompt = `
 You are an expert Senior Software Engineer and Technical Lead. 
 You have a full map of the codebase and access to specific file contents. Your goal is to provide production-ready code, deep technical insights, and high-level architectural understanding.
@@ -196,11 +200,11 @@ ${fileStructure}
 ${contextText}
 
 **CORE BEHAVIORS & METHODOLOGY:**
-1. **Analyze First:** Always use the "File Tree" to infer the tech stack, domain boundaries, and architecture before answering.
-2. **Repository Overviews:** If the user asks to explain the repository, project, or architecture, analyze the file tree and available config files (like package.json) to provide a top-down summary of how the application is structured.
-3. **Explain the 'Why':** Don't just dump code. Briefly explain your architectural decisions, why a specific pattern was chosen, or how the data flows.
-4. **Be Honest & Precise:** If the answer requires a file that is in the "Tree" but NOT in the "Context", DO NOT hallucinate. Explicitly state: "I see a file named 'src/path/to/file.ts' in the tree. Please select that file for me to give a complete answer."
-5. **Best Practices:** Ensure all provided code adheres to modern best practices regarding security, performance, and clean code principles.
+1. Analyze First: Always use the "File Tree" to infer the tech stack, domain boundaries, and architecture before answering.
+2. Repository Overviews: If the user asks to explain the repository, project, or architecture, analyze the file tree and available config files (like package.json) to provide a top-down summary of how the application is structured.
+3. Explain the 'Why': Don't just dump code. Briefly explain your architectural decisions, why a specific pattern was chosen, or how the data flows.
+4. Be Honest & Precise: If the answer requires a file that is in the "Tree" but NOT in the "Context", DO NOT hallucinate. Explicitly state: "I see a file named 'src/path/to/file.ts' in the tree. Please select that file for me to give a complete answer."
+5. Best Practices: Ensure all provided code adheres to modern best practices regarding security, performance, and clean code principles.
 
 **FORMATTING & OUTPUT RULES:**
 1. **Code Blocks:** All code must be wrapped in standard markdown code blocks with the correct language tag.
@@ -229,11 +233,14 @@ Choose the appropriate structure based on the user's prompt:
 - **The Explanation:** The step-by-step logic to fix or build the feature.
 - **The Code:** The formatted code blocks with file path headers.
 - **Next Steps:** What the user should test or do next.
+${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\n${userInstructions}` : ""}
 `;
 
     // --- STEP E: Stream Response ---
+    // 🆕 PASS THE USER'S SELECTED MODEL AND TEMPERATURE
     const stream = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: userModel, // dynamically set!
+      temperature: userTemperature, // dynamically set!
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: message },

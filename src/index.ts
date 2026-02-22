@@ -9,6 +9,8 @@ import authRoutes from "./api/auth/auth.routes";
 import projectsRoutes from "./api/projects/projects.routes";
 import ChatRoutes from "./api/chat/chat.routes";
 import githubRoutes from "./api/github/github.routes";
+import usersRoutes from "./api/users/users.routes";
+import dashboardRoutes from "./api/dashboard/dashboard.routes";
 import { logger } from "./config/logger";
 
 dotenv.config();
@@ -34,6 +36,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectsRoutes);
 app.use("/api/chat", ChatRoutes);
 app.use("/api/github", githubRoutes);
+app.use("/api/users", usersRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 app.get("/", (req: Request, res: Response) => {
   res.json({
     status: "success",

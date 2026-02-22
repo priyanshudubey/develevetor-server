@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../../middlewares/auth.middleware";
+import { checkRateLimit } from "../../middlewares/rateLimit.middleware";
 import {
   listGithubRepos,
   createProject,
@@ -17,7 +18,7 @@ router.use(requireAuth);
 
 router.get("/github-repos", listGithubRepos); // Get list from GitHub
 router.get("/", getMyProjects); // Get my imported projects
-router.post("/", createProject); // Import a project
+router.post("/", checkRateLimit("project_create"), createProject); // Import a project
 router.delete("/:id", deleteProject);
 router.post("/:id/sync", syncProject);
 router.get("/:id/files", getProjectFiles);

@@ -32,22 +32,22 @@ export const checkRateLimit = (type: LimitType) => {
       return;
     }
 
-    if (ADMIN_USER_IDS.includes(userId)) {
-      logger.info(`[RateLimit] Admin bypass for user: ${userId}`, {
-        type,
-        userId,
-      });
+    // if (ADMIN_USER_IDS.includes(userId)) {
+    //   logger.info(`[RateLimit] Admin bypass for user: ${userId}`, {
+    //     type,
+    //     userId,
+    //   });
 
-      // We still need to attach a dummy usage row so the controller doesn't crash
-      // if it tries to access req.usageRow later.
-      (req as any).usageRow = {
-        chat_count: 0,
-        pr_count: 0,
-        project_create_count: 0,
-      };
+    //   // We still need to attach a dummy usage row so the controller doesn't crash
+    //   // if it tries to access req.usageRow later.
+    //   (req as any).usageRow = {
+    //     chat_count: 0,
+    //     pr_count: 0,
+    //     project_create_count: 0,
+    //   };
 
-      return next();
-    }
+    //   return next();
+    // }
 
     try {
       // 1. Fetch current usage
@@ -185,7 +185,7 @@ export const incrementUsage = async (
   userId: string,
   type: "chat" | "pr" | "project_create",
 ) => {
-  if (ADMIN_USER_IDS.includes(userId)) return;
+  // if (ADMIN_USER_IDS.includes(userId)) return;
   const column =
     type === "chat"
       ? "chat_count"
