@@ -4,6 +4,7 @@ import { GitHubService } from "../../services/github.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 
 import { OpenAI } from "openai";
+import { logger } from "../../config/logger";
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -134,7 +135,7 @@ export const createPullRequest = async (
 
     // 4. THE MERGE PIPELINE: Fetch existing file & merge
     let currentSha: string | undefined;
-    let fullyMergedFileContent = newContent; // Default to the snippet (in case it's a brand new file)
+    let fullyMergedFileContent = newContent;
 
     try {
       const currentFile = await ghService.getFile(owner, repo, filePath);
@@ -142,27 +143,35 @@ export const createPullRequest = async (
 
       // If the file exists, GitHub returns base64 content. We decode it, then merge it.
       if (currentFile.content) {
-        console.log(
+        logger.info(
           `[PR Workflow] Existing file found. Merging snippet invisibly...`,
+          {
+            filePath,
+            projectId,
+          },
         );
         const originalFileContent = currentFile.content;
 
-        console.log(
-          `[PR Workflow] Original File Lines: ${originalFileContent.split("\n").length}`,
-        );
+        logger.info(`[PR Workflow] Original File Lines: `, {
+          lines: originalFileContent.split("\n").length,
+          filePath,
+          projectId,
+        });
 
         // Let the AI merge the snippet into the full 300-line file
         fullyMergedFileContent = await performHiddenMerge(
           originalFileContent,
           newContent,
         );
-        console.log(
+        logger.info(
           `[PR Workflow] Merged File Lines: ${fullyMergedFileContent.split("\n").length}`,
+          { filePath, projectId },
         );
       }
     } catch (e) {
-      console.log(
+      logger.info(
         `[PR Workflow] File ${filePath} not found. Creating as a new file.`,
+        { filePath, projectId },
       );
     }
 
@@ -172,7 +181,10 @@ export const createPullRequest = async (
     try {
       await ghService.createBranch(owner, repo, baseBranch, branchName);
     } catch (error: any) {
-      console.warn(`Branch ${branchName} creation skipped: ${error.message}`);
+      logger.warn(`Branch ${branchName} creation skipped: ${error.message}`, {
+        branchName,
+        projectId,
+      });
     }
 
     // B. Commit the File Change
@@ -203,7 +215,10 @@ export const createPullRequest = async (
     // 7. Success
     res.json({ success: true, prUrl });
   } catch (error: any) {
-    console.error("PR Controller Error:", error);
+    logger.error("PR Controller Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      projectId,
+    });
     if (error.status === 422) {
       res
         .status(422)

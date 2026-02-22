@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import { supabase } from "../../config/supabase";
+import { logger } from "../../config/logger";
 
 // --- 1. Initiate Login ---
 // Redirects the user to GitHub's consent screen
@@ -76,7 +77,10 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
       .single();
 
     if (error) {
-      console.error("Supabase Error:", error);
+      logger.error("Supabase Error:", {
+        error: error instanceof Error ? error.message : String(error),
+        githubId: userData.id,
+      });
       throw error;
     }
 
@@ -97,7 +101,9 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
 
     res.redirect("http://localhost:5173/dashboard"); // Redirect to Frontend
   } catch (error) {
-    console.error("Auth Callback Error:", error);
+    logger.error("Auth Callback Error:", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.redirect("http://localhost:5173?error=auth_failed");
   }
 };
@@ -207,7 +213,10 @@ export const getUserUsage = async (
       resetAt: nextResetTime.toISOString(),
     });
   } catch (err) {
-    console.error("Get usage error:", err);
+    logger.error("Get usage error:", {
+      error: err instanceof Error ? err.message : String(err),
+      userId,
+    });
     res.status(500).json({ error: "Failed to fetch usage limits" });
   }
 };

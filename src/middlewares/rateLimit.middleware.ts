@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { supabase } from "../config/supabase";
+import { logger } from "../config/logger";
 
 // Define limits in one place so they are easy to tweak
 const LIMITS = {
@@ -31,19 +32,22 @@ export const checkRateLimit = (type: LimitType) => {
       return;
     }
 
-    // if (ADMIN_USER_IDS.includes(userId)) {
-    //   console.log(`[RateLimit] Admin bypass for user: ${userId}`);
+    if (ADMIN_USER_IDS.includes(userId)) {
+      logger.info(`[RateLimit] Admin bypass for user: ${userId}`, {
+        type,
+        userId,
+      });
 
-    //   // We still need to attach a dummy usage row so the controller doesn't crash
-    //   // if it tries to access req.usageRow later.
-    //   (req as any).usageRow = {
-    //     chat_count: 0,
-    //     pr_count: 0,
-    //     project_create_count: 0,
-    //   };
+      // We still need to attach a dummy usage row so the controller doesn't crash
+      // if it tries to access req.usageRow later.
+      (req as any).usageRow = {
+        chat_count: 0,
+        pr_count: 0,
+        project_create_count: 0,
+      };
 
-    //   return next();
-    // }
+      return next();
+    }
 
     try {
       // 1. Fetch current usage
@@ -54,7 +58,10 @@ export const checkRateLimit = (type: LimitType) => {
         .maybeSingle();
 
       if (error) {
-        console.error("Rate Limit Error: Could not fetch usage", error);
+        logger.error("Rate Limit Error: Could not fetch usage", {
+          error: error instanceof Error ? error.message : String(error),
+          userId,
+        });
         // Fail open or closed? Let's fail safe (allow) but log it, or block.
         // For beta, let's block to be safe.
         res.status(500).json({ error: "Could not verify usage limits" });
@@ -64,7 +71,10 @@ export const checkRateLimit = (type: LimitType) => {
       let currentUsage = usage;
 
       if (!currentUsage) {
-        console.log(`Creating missing usage row for user: ${userId}`);
+        logger.info(`Creating missing usage row for user: ${userId}`, {
+          type,
+          userId,
+        });
         const { data: newUsage, error: insertError } = await supabase
           .from("user_usage")
           .insert([{ user_id: userId }])
@@ -72,10 +82,13 @@ export const checkRateLimit = (type: LimitType) => {
           .single();
 
         if (insertError || !newUsage) {
-          console.error(
-            "Rate Limit Error: Could not create usage row",
-            insertError,
-          );
+          logger.error("Rate Limit Error: Could not create usage row", {
+            error:
+              insertError instanceof Error
+                ? insertError.message
+                : String(insertError),
+            userId,
+          });
           res.status(500).json({ error: "Could not initialize usage limits" });
           return;
         }
@@ -158,7 +171,10 @@ export const checkRateLimit = (type: LimitType) => {
       (req as any).usageRow = currentUsage;
       next();
     } catch (err) {
-      console.error("Rate Limit Middleware Exception:", err);
+      logger.error("Rate Limit Middleware Exception:", {
+        error: err instanceof Error ? err.message : String(err),
+        userId,
+      });
       res.status(500).json({ error: "Server error checking limits" });
     }
   };
@@ -169,7 +185,7 @@ export const incrementUsage = async (
   userId: string,
   type: "chat" | "pr" | "project_create",
 ) => {
-  //   if (ADMIN_USER_IDS.includes(userId)) return;
+  if (ADMIN_USER_IDS.includes(userId)) return;
   const column =
     type === "chat"
       ? "chat_count"

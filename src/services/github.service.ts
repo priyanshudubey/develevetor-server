@@ -1,4 +1,5 @@
 import { Octokit } from "octokit";
+import { logger } from "../config/logger";
 
 export class GitHubService {
   private octokit: Octokit;
@@ -32,7 +33,12 @@ export class GitHubService {
         sha: data.sha,
       };
     } catch (error: any) {
-      console.error("GitHub Service Error (getFile):", error.message);
+      logger.error("GitHub Service Error (getFile):", {
+        error: error instanceof Error ? error.message : String(error),
+        owner,
+        repo,
+        path,
+      });
       throw new Error(`Failed to fetch file: ${path}. Check if it exists.`);
     }
   }

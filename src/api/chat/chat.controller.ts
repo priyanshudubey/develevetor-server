@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
 import { OpenAI } from "openai"; // Ensure this matches your export
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
+import { logger } from "../../config/logger";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -19,13 +20,16 @@ export const getChatHistory = async (
       .from("chat_messages")
       .select("*")
       .eq("project_id", projectId)
-      .order("created_at", { ascending: true }); // Oldest first
+      .order("created_at", { ascending: true });
 
     if (error) throw error;
 
     res.json(data);
   } catch (error) {
-    console.error("Get History Error:", error);
+    logger.error("Get History Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      userId: (req as any).user?.id,
+    });
     res.status(500).json({ error: "Failed to fetch history" });
   }
 };
@@ -186,10 +190,10 @@ You are an expert Senior Software Engineer and Technical Lead.
 You have a full map of the codebase and access to specific file contents. Your goal is to provide production-ready code, deep technical insights, and high-level architectural understanding.
 
 **PROJECT ARCHITECTURE (File Tree):**
-\${fileStructure}
+${fileStructure}
 
 **AVAILABLE CODE CONTEXT:**
-\${contextText}
+${contextText}
 
 **CORE BEHAVIORS & METHODOLOGY:**
 1. **Analyze First:** Always use the "File Tree" to infer the tech stack, domain boundaries, and architecture before answering.
@@ -257,7 +261,10 @@ Choose the appropriate structure based on the user's prompt:
 
     res.end();
   } catch (error) {
-    console.error("Chat Error:", error);
+    logger.error("Chat Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      userId: (req as any).user?.id,
+    });
     if (!res.headersSent) {
       res.status(500).json({ error: "Failed to generate answer" });
     } else {

@@ -5,6 +5,7 @@ import { glob } from "glob";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { supabase } from "../config/supabase";
+import { logger } from "../config/logger";
 
 const GITHUB_TOKEN = process.env.GITHUB_ACCESS_TOKEN; // We will get this dynamically
 const TEMP_DIR = path.join(__dirname, "../../temp_repos");
@@ -27,7 +28,10 @@ export class IndexerService {
     // Format: https://token@github.com/user/repo.git
     const authUrl = repoUrl.replace("https://", `https://${githubToken}@`);
 
-    console.log(`Cloning ${repoUrl} into ${repoPath}...`);
+    logger.info(`Cloning ${repoUrl} into ${repoPath}...`, {
+      projectId,
+      repoUrl,
+    });
     await simpleGit().clone(authUrl, repoPath, ["--depth", "1"]); // Shallow clone for speed
 
     return repoPath;
@@ -42,7 +46,7 @@ export class IndexerService {
       nodir: true,
     });
 
-    console.log(`Found ${files.length} files to index.`);
+    logger.info(`Found ${files.length} files to index.`, { repoPath });
 
     const documents = [];
     for (const file of files) {
@@ -61,7 +65,9 @@ export class IndexerService {
     projectId: string,
     documents: { path: string; content: string }[],
   ) {
-    console.log(`Chunking & Embedding ${documents.length} files...`);
+    logger.info(`Chunking & Embedding ${documents.length} files...`, {
+      projectId,
+    });
 
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
@@ -104,10 +110,14 @@ export class IndexerService {
       // C. Save to Supabase
       if (insertData.length > 0) {
         const { error } = await supabase.from("documents").insert(insertData);
-        if (error) console.error("Supabase Insert Error:", error);
+        if (error)
+          logger.error("Supabase Insert Error:", {
+            error: error instanceof Error ? error.message : String(error),
+            projectId,
+          });
       }
 
-      console.log(`Indexed batch ${i / BATCH_SIZE + 1}`);
+      logger.info(`Indexed batch ${i / BATCH_SIZE + 1}`, { projectId });
     }
   }
 
@@ -136,9 +146,14 @@ export class IndexerService {
         .update({ status: "READY", last_indexed_at: new Date() })
         .eq("id", projectId);
 
-      console.log(`Project ${projectId} indexing complete!`);
+      logger.info(`Project ${projectId} indexing complete!`, {
+        projectId,
+      });
     } catch (error) {
-      console.error(`Indexing failed for ${projectId}:`, error);
+      logger.error(`Indexing failed for ${projectId}:`, {
+        error: error instanceof Error ? error.message : String(error),
+        projectId,
+      });
       await supabase
         .from("projects")
         .update({ status: "ERROR" })

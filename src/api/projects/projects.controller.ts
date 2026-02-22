@@ -3,6 +3,7 @@ import axios from "axios";
 import { supabase } from "../../config/supabase";
 import { indexerService } from "../../services/indexer.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
+import { logger } from "../../config/logger";
 
 // 1. List User's Repos from GitHub (for the selection modal)
 export const listGithubRepos = async (
@@ -49,7 +50,9 @@ export const listGithubRepos = async (
 
     res.json({ repos });
   } catch (error) {
-    console.error("GitHub API Error:", error);
+    logger.error("GitHub API Error:", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: "Failed to fetch repositories" });
   }
 };
@@ -75,33 +78,51 @@ export const syncProject = async (
       return;
     }
 
-    // 2. Wipe Old Embeddings (Crucial!)
-    // If we don't do this, the AI will find two versions of every file.
-    await supabase.from("documents").delete().eq("project_id", id);
-
-    // 3. Set Status to INDEXING
-    await supabase
-      .from("projects")
-      .update({ status: "INDEXING", last_indexed_at: new Date() })
-      .eq("id", id);
-
-    // 4. Respond to Client immediately
-    res.json({ success: true });
-
-    // 5. Get GitHub Token & Trigger Indexing (Background)
+    // 2. Fetch Token BEFORE touching the database (Safety Check)
     const { data: user } = await supabase
       .from("users")
       .select("github_token")
       .eq("id", userId)
       .single();
 
-    if (user?.github_token) {
-      indexerService
-        .processProject(project.id, project.url, user.github_token)
-        .catch((err) => console.error("Re-indexing failed:", err));
+    if (!user?.github_token) {
+      // Fail early so we don't accidentally wipe their existing vectors!
+      res.status(403).json({ error: "GitHub token missing. Cannot sync." });
+      return;
     }
+
+    // 3. Wipe Old Embeddings
+    await supabase.from("documents").delete().eq("project_id", id);
+
+    // 4. Set Status to INDEXING
+    await supabase
+      .from("projects")
+      .update({ status: "INDEXING", last_indexed_at: new Date() })
+      .eq("id", id);
+
+    // 5. Respond to Client immediately
+    res.json({ success: true });
+
+    // 6. Trigger Indexing (Background) with State Recovery
+    indexerService
+      .processProject(project.id, project.url, user.github_token)
+      .catch(async (err) => {
+        logger.error("Re-indexing failed:", {
+          error: err instanceof Error ? err.message : String(err),
+          userId,
+          projectId: id,
+        });
+        await supabase
+          .from("projects")
+          .update({ status: "FAILED" })
+          .eq("id", id);
+      });
   } catch (error) {
-    console.error("Sync Project Error:", error);
+    logger.error("Sync Project Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      userId,
+      projectId: id,
+    });
     res.status(500).json({ error: "Failed to sync project" });
   }
 };
@@ -172,10 +193,19 @@ export const createProject = async (
       // D. Trigger Background Indexing (Only runs for truly new projects)
       indexerService
         .processProject(project.id, url, user.github_token)
-        .catch((err) => console.error("Background indexing failed:", err));
+        .catch((err) =>
+          logger.error("Background indexing failed:", {
+            error: err instanceof Error ? err.message : String(err),
+            userId,
+            projectId: project.id,
+          }),
+        );
     }
   } catch (error) {
-    console.error("Create Project Error:", error);
+    logger.error("Create Project Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      userId,
+    });
     res.status(500).json({ error: "Failed to create project" });
   }
 };
@@ -220,7 +250,10 @@ export const deleteProject = async (
 
     res.json({ success: true });
   } catch (error) {
-    console.error("Delete Project Error:", error);
+    logger.error("Delete Project Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      userId,
+    });
     res.status(500).json({ error: "Failed to delete project" });
   }
 };
@@ -242,7 +275,10 @@ export const getProjectFiles = async (
     });
 
     if (error) {
-      console.error("RPC Search Error:", error);
+      logger.error("RPC Search Error:", {
+        error: error instanceof Error ? error.message : String(error),
+        projectId: id,
+      });
       throw error;
     }
 
@@ -252,7 +288,10 @@ export const getProjectFiles = async (
 
     res.json({ files });
   } catch (error) {
-    console.error("Search Files Error:", error);
+    logger.error("Search Files Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      projectId: id,
+    });
     res.status(500).json({ error: "Failed to search files" });
   }
 };
@@ -323,13 +362,23 @@ export const getFileContent = async (
           return;
         }
       } catch (ghError: any) {
-        console.warn(`[GitHub] Fetch failed: ${ghError.message}`);
+        logger.warn(`[GitHub] Fetch failed: `, {
+          error:
+            ghError.response?.status === 404
+              ? "File not found"
+              : ghError.message,
+          projectId: id,
+          path,
+        });
       }
     }
 
     // 4. Fallback: Search Supabase Index (The "Indexed" version)
     if (!githubSuccess) {
-      console.log("[Fallback] Searching DB for content...");
+      logger.info("[Fallback] Searching DB for content...", {
+        projectId: id,
+        path,
+      });
 
       // Match standard path OR Windows path
       const { data: dbDoc } = await supabase
@@ -348,7 +397,11 @@ export const getFileContent = async (
       }
     }
   } catch (error: any) {
-    console.error("[FileView] Error:", error.message);
+    logger.error("[FileView] Error:", {
+      error: error instanceof Error ? error.message : String(error),
+      projectId: id,
+      path,
+    });
     res.status(500).json({ error: "Server error retrieving file" });
   }
 };
