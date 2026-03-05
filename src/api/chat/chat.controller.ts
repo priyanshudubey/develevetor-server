@@ -1,12 +1,8 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config/supabase";
-import { OpenAI } from "openai";
+import { callAIStream, getEmbedding, AIError, trimMessages } from "../../services/ai.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 import { logger } from "../../config/logger";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 // 1. GET CHAT HISTORY
 export const getChatHistory = async (
@@ -83,9 +79,10 @@ export const chatWithProject = async (
   const userId = (req as any).user?.id;
 
   try {
-    // 0. Increment usage before stream starts
+    // 0. Increment usage proportional to model cost (set by checkRateLimit middleware)
     if (userId) {
-      await incrementUsage(userId, "chat");
+      const modelCost: number = (req as any).modelCost ?? 1;
+      await incrementUsage(userId, "chat", modelCost);
     }
 
     // 🆕 FETCH USER PREFERENCES (Defaults applied if not found)
@@ -158,12 +155,8 @@ export const chatWithProject = async (
     }
 
     // --- STEP C: Vector Search (The "Specifics") ---
-    // 🆕 Use a lightweight model for embeddings to save money, regardless of what the user selected for chat
-    const embeddingResponse = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: message,
-    });
-    const queryVector = embeddingResponse?.data[0]?.embedding;
+    // Always use lightweight embedding model regardless of user chat model choice
+    const queryVector = await getEmbedding(message);
 
     const { data: vectorDocs } = await supabase.rpc("match_documents", {
       query_embedding: queryVector,
@@ -236,27 +229,24 @@ Choose the appropriate structure based on the user's prompt:
 ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\n${userInstructions}` : ""}
 `;
 
-    // --- STEP E: Stream Response ---
-    // 🆕 PASS THE USER'S SELECTED MODEL AND TEMPERATURE
-    const stream = await openai.chat.completions.create({
-      model: userModel, // dynamically set!
-      temperature: userTemperature, // dynamically set!
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message },
-      ],
-      stream: true,
-    });
-
+    // --- STEP E: Stream Response via ai.service router ---
+    // callAIStream uses callbacks to unify OpenAI / Anthropic / Google streams
     let fullAnswer = "";
 
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content || "";
-      if (text) {
-        res.write(text);
-        fullAnswer += text;
-      }
-    }
+    await new Promise<void>((resolve, reject) => {
+      callAIStream({
+        model: userModel,
+        temperature: userTemperature,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message },
+        ],
+        stream: true,
+        onChunk: (delta) => { res.write(delta); fullAnswer += delta; },
+        onDone: (_full) => resolve(),
+        onError: (err: AIError) => reject(err),
+      });
+    });
 
     // Save Assistant Message
     await supabase.from("chat_messages").insert({
@@ -268,12 +258,18 @@ ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\
 
     res.end();
   } catch (error) {
+    const isAIError = error instanceof AIError;
     logger.error("Chat Error:", {
       error: error instanceof Error ? error.message : String(error),
+      code: isAIError ? error.code : undefined,
+      retryable: isAIError ? error.retryable : undefined,
       userId: (req as any).user?.id,
     });
     if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate answer" });
+      const status = isAIError && error.code === "rate_limit" ? 429
+                   : isAIError && error.code === "auth"       ? 401
+                   : 500;
+      res.status(status).json({ error: isAIError ? error.message : "Failed to generate answer" });
     } else {
       res.end();
     }

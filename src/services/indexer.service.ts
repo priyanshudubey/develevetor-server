@@ -6,6 +6,7 @@ import { OpenAIEmbeddings } from "@langchain/openai";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { supabase } from "../config/supabase";
 import { logger } from "../config/logger";
+import { indexerOrchestrator } from "./indexer-orchestrator";
 
 const GITHUB_TOKEN = process.env.GITHUB_ACCESS_TOKEN; // We will get this dynamically
 const TEMP_DIR = path.join(__dirname, "../../temp_repos");
@@ -134,8 +135,12 @@ export class IndexerService {
       // Step 2: Read
       const docs = await this.readFiles(repoPath);
 
-      // Step 3: Embed & Store
+      // Step 3: Chunk, embed & store (existing RAG pipeline)
       await this.indexDocuments(projectId, docs);
+
+      // Step 4: Deep Context Analysis (AST + AI Summary + Security)
+      //         Runs in parallel tracks with concurrency cap of 5 AI calls
+      await indexerOrchestrator.processFiles(projectId, docs);
 
       // Step 4: Cleanup
       await fs.remove(repoPath);

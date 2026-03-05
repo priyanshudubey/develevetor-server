@@ -4,18 +4,23 @@ import jwt from "jsonwebtoken";
 import { supabase } from "../../config/supabase";
 import { logger } from "../../config/logger";
 
+// Optional: Define what your attached user looks like to avoid 'any'
+interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string;
+    email: string;
+    plan: "FREE" | "PRO";
+  };
+}
+
 // --- 1. Initiate Login ---
-// Redirects the user to GitHub's consent screen
 export const login = (req: Request, res: Response) => {
   const scopes = "user:email repo";
-
   const redirectUri = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=${encodeURIComponent(scopes)}`;
-
   res.redirect(redirectUri);
 };
 
 // --- 2. Handle Callback ---
-// GitHub redirects back here with a "code". We exchange it for a token.
 export const callback = async (req: Request, res: Response): Promise<void> => {
   const code = req.query.code as string;
 
@@ -25,7 +30,7 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    // A. Exchange Code for Access Token
+    // A. Exchange Code for Access Token with a 5-second timeout
     const tokenResponse = await axios.post(
       "https://github.com/login/oauth/access_token",
       {
@@ -33,33 +38,36 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
         client_secret: process.env.GITHUB_CLIENT_SECRET,
         code,
       },
-      { headers: { Accept: "application/json" } },
+      { 
+        headers: { Accept: "application/json" },
+        timeout: 5000 // 5 seconds is plenty for a healthy API call
+      },
     );
 
     const accessToken = tokenResponse.data.access_token;
 
     if (!accessToken) {
+      // GitHub sometimes sends 200 OK with an error field inside the body
+      if (tokenResponse.data.error) {
+         throw new Error(`GitHub OAuth Error: ${tokenResponse.data.error_description}`);
+      }
       throw new Error("Failed to get access token from GitHub");
     }
 
     // B. Fetch User Profile
     const userResponse = await axios.get("https://api.github.com/user", {
       headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 5000
     });
 
-    // C. Fetch Email (Privately if needed)
     const emailsResponse = await axios.get(
       "https://api.github.com/user/emails",
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      },
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 5000 },
     );
 
     const primaryEmail = emailsResponse.data.find((e: any) => e.primary)?.email;
     const userData = userResponse.data;
 
-    // D. Upsert User into Supabase
-    // "Upsert" means: Insert if new, Update if exists.
     const { data: user, error } = await supabase
       .from("users")
       .upsert(
@@ -76,40 +84,37 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
       .select()
       .single();
 
-    if (error) {
-      logger.error("Supabase Error:", {
-        error: error instanceof Error ? error.message : String(error),
-        githubId: userData.id,
-      });
-      throw error;
-    }
+    if (error) throw error;
 
-    // E. Generate JWT (Our Session Token)
     const sessionToken = jwt.sign(
-      { id: user.id, email: user.email },
+      { id: user.id, email: user.email, plan: user.plan },
       process.env.JWT_SECRET!,
       { expiresIn: "7d" },
     );
 
-    // F. Set HTTP-Only Cookie & Redirect
     res.cookie("auth_token", sessionToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production", // False in localhost
+      secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect("http://localhost:5173/dashboard"); // Redirect to Frontend
-  } catch (error) {
+    res.redirect("http://localhost:5173/dashboard");
+  } catch (error: any) {
+    // 🌟 ENHANCED LOGGING
     logger.error("Auth Callback Error:", {
-      error: error instanceof Error ? error.message : String(error),
+      message: error.message,
+      code: error.code, // Useful for 'ECONNABORTED' or 'ENOTFOUND'
+      response: error.response?.data,
     });
-    res.redirect("http://localhost:5173?error=auth_failed");
+    
+    // Redirect with a specific error code for the UI
+    const errorType = error.code === 'ECONNABORTED' ? 'timeout' : 'auth_failed';
+    res.redirect(`http://localhost:5173?error=${errorType}`);
   }
 };
 
 // --- 3. Get Current User ---
-// Used by the frontend to check if logged in
 export const getMe = async (req: Request, res: Response): Promise<void> => {
   const token = req.cookies.auth_token;
 
@@ -146,11 +151,19 @@ export const logout = (req: Request, res: Response) => {
   res.json({ success: true });
 };
 
+// --- 5. Get Usage ---
 export const getUserUsage = async (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response,
 ): Promise<void> => {
-  const userId = (req as any).user?.id;
+  const userId = req.user?.id;
+  // 🌟 Optimization: Grab the plan directly from the authenticated user object!
+  const userPlan = req.user?.plan || "FREE";
+
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
 
   try {
     let { data: usage, error } = await supabase
@@ -161,7 +174,6 @@ export const getUserUsage = async (
 
     if (error) throw error;
 
-    // Self-Healing: If no row exists, create one
     if (!usage) {
       const { data: newUsage, error: insertError } = await supabase
         .from("user_usage")
@@ -173,7 +185,6 @@ export const getUserUsage = async (
       usage = newUsage;
     }
 
-    // Check for 24h reset
     const now = new Date();
     const lastReset = new Date(usage.last_reset_at);
     const oneDay = 24 * 60 * 60 * 1000;
@@ -194,29 +205,40 @@ export const getUserUsage = async (
       if (!resetError) usage = resetData;
     }
 
-    // Calculate the next reset time to send to the frontend
     const nextResetTime = new Date(
       new Date(usage.last_reset_at).getTime() + oneDay,
     );
+
+    const { count: activeProjectsCount } = await supabase
+      .from("projects")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .neq("status", "ARCHIVED");
+
+    // 🌟 Apply Dynamic Limits Based on the user's plan
+    const isPro = userPlan === "PRO";
 
     res.json({
       usage: {
         chats: usage.chat_count,
         prs: usage.pr_count,
         projectCreates: usage.project_create_count,
+        activeProjects: activeProjectsCount || 0,
       },
       limits: {
-        chats: 15,
-        prs: 3,
-        projectCreates: 2,
+        chats: isPro ? 9999 : 15,
+        prs: isPro ? 999 : 3,
+        dailyProjectCreates: isPro ? 10 : 2,
+        maxActiveProjects: isPro ? 15 : 3,
+      },
+      totals: {
+        chats: usage.total_chats || 0,
+        prs: usage.total_prs || 0,
       },
       resetAt: nextResetTime.toISOString(),
     });
   } catch (err) {
-    logger.error("Get usage error:", {
-      error: err instanceof Error ? err.message : String(err),
-      userId,
-    });
+    logger.error("Get usage error:", err);
     res.status(500).json({ error: "Failed to fetch usage limits" });
   }
 };

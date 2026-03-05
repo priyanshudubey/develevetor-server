@@ -14,7 +14,6 @@ export const getDashboardData = async (
   }
 
   try {
-    // 1. Fetch Recent Projects (Limit to 4)
     const { data: projects, error: projectsError } = await supabase
       .from("projects")
       .select("id, name, status, created_at, last_indexed_at")
@@ -25,19 +24,15 @@ export const getDashboardData = async (
 
     if (projectsError) throw projectsError;
 
-    // 2. Fetch Lifetime/Current Usage Metrics
-    // Assuming we pull the current user_usage row to get their total PRs and Chats
     const { data: usage } = await supabase
       .from("user_usage")
-      .select("chat_count, pr_count")
+      .select("total_chats, total_prs")
       .eq("user_id", userId)
       .single();
 
-    const totalChats = usage?.chat_count || 0;
-    const totalPrs = usage?.pr_count || 0;
+    const totalChats = usage?.total_chats || 0;
+    const totalPrs = usage?.total_prs || 0;
 
-    // 🌟 SaaS Flex Metric: Calculate Estimated Time Saved
-    // Let's estimate 10 mins saved per chat, and 45 mins saved per PR.
     const minutesSaved = totalChats * 10 + totalPrs * 45;
     const hoursSaved = (minutesSaved / 60).toFixed(1);
 
@@ -48,11 +43,9 @@ export const getDashboardData = async (
     };
 
     // 3. Construct the Activity Feed
-    // For a production app, you might have an `activity_logs` table.
-    // For now, we will map their recent projects into an activity timeline.
     const activityFeed = (projects || []).map((project, index) => ({
       id: project.id,
-      type: index % 2 === 0 ? "chat" : "project", // Alternating icons for visual variety
+      type: index % 2 === 0 ? "chat" : "project",
       text:
         index === 0
           ? `Last active in workspace: ${project.name.split("/").pop()}`

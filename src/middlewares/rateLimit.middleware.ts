@@ -1,23 +1,46 @@
+/**
+ * ╔══════════════════════════════════════════════════════════════════╗
+ * ║    DevElevator  ·  Rate Limit Middleware  ·  Weighted Costing   ║
+ * ╚══════════════════════════════════════════════════════════════════╝
+ */
+
 import { Request, Response, NextFunction } from "express";
 import { supabase } from "../config/supabase";
 import { logger } from "../config/logger";
+import { MODEL_CONFIGS, DEFAULT_MODEL } from "../services/ai.service";
 
-// Define limits in one place so they are easy to tweak
+// ─── Tier Definitions ─────────────────────────────────────────────────────────
+
 const LIMITS = {
   FREE: {
-    CHATS_PER_DAY: 15,
+    /** Weighted daily chat budget (each model deducts its cost) */
+    CHAT_BUDGET_PER_DAY: 15,
     PRS_PER_DAY: 3,
     PROJECT_CREATES_PER_DAY: 2,
     MAX_ACTIVE_PROJECTS: 3,
+    /** FREE tier cannot use models with cost > this threshold */
+    MAX_MODEL_COST: 1,
   },
-};
+  PRO: {
+    CHAT_BUDGET_PER_DAY: 9_999,
+    PRS_PER_DAY: 999,
+    PROJECT_CREATES_PER_DAY: 10,
+    MAX_ACTIVE_PROJECTS: 15,
+    MAX_MODEL_COST: 99,           // No model restrictions for PRO
+  },
+} as const;
 
-const ADMIN_USER_IDS = [
-  "your-uuid-goes-here-e.g-123e4567-e89b...",
-  process.env.ADMIN_USER_ID, // Support environment variable
-];
+const ADMIN_USER_IDS: (string | undefined)[] = [process.env.ADMIN_USER_ID];
 
 type LimitType = "chat" | "pr" | "project_create";
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
+
+function getModelCost(modelId: string): number {
+  return MODEL_CONFIGS[modelId]?.cost ?? MODEL_CONFIGS[DEFAULT_MODEL]?.cost ?? 1;
+}
+
+// ─── checkRateLimit Middleware ────────────────────────────────────────────────
 
 export const checkRateLimit = (type: LimitType) => {
   return async (
@@ -26,55 +49,37 @@ export const checkRateLimit = (type: LimitType) => {
     next: NextFunction,
   ): Promise<void> => {
     const userId = (req as any).user?.id;
+    const userPlan: "FREE" | "PRO" =
+      (req as any).user?.plan === "PRO" ? "PRO" : "FREE";
+    const currentLimits = LIMITS[userPlan];
 
     if (!userId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
-    // if (ADMIN_USER_IDS.includes(userId)) {
-    //   logger.info(`[RateLimit] Admin bypass for user: ${userId}`, {
-    //     type,
-    //     userId,
-    //   });
-
-    //   // We still need to attach a dummy usage row so the controller doesn't crash
-    //   // if it tries to access req.usageRow later.
-    //   (req as any).usageRow = {
-    //     chat_count: 0,
-    //     pr_count: 0,
-    //     project_create_count: 0,
-    //   };
-
-    //   return next();
-    // }
+    // Admins bypass all limits
+    if (ADMIN_USER_IDS.includes(userId)) {
+      next();
+      return;
+    }
 
     try {
-      // 1. Fetch current usage
-      const { data: usage, error } = await supabase
+      // ── 1. Fetch or self-heal usage row ────────────────────────────────────
+      let { data: currentUsage, error } = await supabase
         .from("user_usage")
         .select("*")
         .eq("user_id", userId)
         .maybeSingle();
 
       if (error) {
-        logger.error("Rate Limit Error: Could not fetch usage", {
-          error: error instanceof Error ? error.message : String(error),
-          userId,
-        });
-        // Fail open or closed? Let's fail safe (allow) but log it, or block.
-        // For beta, let's block to be safe.
+        logger.error("Rate Limit: failed to fetch usage", { error: error.message, userId });
         res.status(500).json({ error: "Could not verify usage limits" });
         return;
       }
 
-      let currentUsage = usage;
-
       if (!currentUsage) {
-        logger.info(`Creating missing usage row for user: ${userId}`, {
-          type,
-          userId,
-        });
+        logger.info(`Rate Limit: self-healing — creating usage row for ${userId}`);
         const { data: newUsage, error: insertError } = await supabase
           .from("user_usage")
           .insert([{ user_id: userId }])
@@ -82,26 +87,19 @@ export const checkRateLimit = (type: LimitType) => {
           .single();
 
         if (insertError || !newUsage) {
-          logger.error("Rate Limit Error: Could not create usage row", {
-            error:
-              insertError instanceof Error
-                ? insertError.message
-                : String(insertError),
-            userId,
-          });
+          logger.error("Rate Limit: could not create usage row", insertError);
           res.status(500).json({ error: "Could not initialize usage limits" });
           return;
         }
-        currentUsage = newUsage; // Now currentUsage is guaranteed to be an object!
+        currentUsage = newUsage;
       }
 
-      // 2. Check if we need to RESET (New Day)
+      // ── 2. Daily reset if > 24 h since last_reset_at ───────────────────────
       const now = new Date();
       const lastReset = new Date(currentUsage.last_reset_at);
       const oneDay = 24 * 60 * 60 * 1000;
 
       if (now.getTime() - lastReset.getTime() > oneDay) {
-        // It's been more than 24h, reset counters!
         const { data: resetData, error: resetError } = await supabase
           .from("user_usage")
           .update({
@@ -114,78 +112,124 @@ export const checkRateLimit = (type: LimitType) => {
           .select()
           .single();
 
-        if (!resetError) {
-          currentUsage = resetData;
-        }
+        if (!resetError && resetData) currentUsage = resetData;
       }
 
-      const nextResetTime = new Date(lastReset.getTime() + oneDay);
+      const nextResetTime = new Date(
+        new Date(currentUsage.last_reset_at).getTime() + oneDay,
+      );
 
-      // 3. Check Specific Limits
+      // ── 3. Evaluate limits ─────────────────────────────────────────────────
+
       if (type === "chat") {
-        if (currentUsage.chat_count >= LIMITS.FREE.CHATS_PER_DAY) {
-          res.status(429).json({
-            error: `Daily chat limit reached (${LIMITS.FREE.CHATS_PER_DAY}/day).`,
-            resetAt: nextResetTime.toISOString(),
+        // ── a. Weighted model cost ──────────────────────────────────────────
+        const requestedModel: string = req.body?.model ?? DEFAULT_MODEL;
+        const modelCost = getModelCost(requestedModel);
+        const modelCfg = MODEL_CONFIGS[requestedModel] ?? MODEL_CONFIGS[DEFAULT_MODEL]!;
+
+        // ── b. FREE tier: block heavy models entirely ───────────────────────
+        if (userPlan === "FREE" && modelCost > currentLimits.MAX_MODEL_COST) {
+          logger.warn(`Rate Limit: FREE user blocked from heavy model`, {
+            userId, model: requestedModel, cost: modelCost,
+          });
+          res.status(403).json({
+            error: `"${modelCfg.label}" requires a Pro subscription (model cost: ${modelCost}x). Upgrade to unlock all models.`,
+            upgradeRequired: true,
           });
           return;
         }
+
+        // ── c. Budget check: current + cost must be ≤ daily budget ─────────
+        const remainingBudget =
+          currentLimits.CHAT_BUDGET_PER_DAY - (currentUsage.chat_count ?? 0);
+
+        if (modelCost > remainingBudget) {
+          logger.warn(`Rate Limit: chat budget exhausted`, {
+            userId, userPlan, used: currentUsage.chat_count,
+            budget: currentLimits.CHAT_BUDGET_PER_DAY, modelCost,
+          });
+          res.status(429).json({
+            error:
+              userPlan === "PRO"
+                ? `Fair use limit reached. Resets at ${nextResetTime.toISOString()}.`
+                : `Daily chat budget exhausted (${currentLimits.CHAT_BUDGET_PER_DAY} credits/day). "${modelCfg.label}" costs ${modelCost} credits. Upgrade to Pro for unlimited access!`,
+            resetAt: nextResetTime.toISOString(),
+            creditsUsed: currentUsage.chat_count,
+            creditsTotal: currentLimits.CHAT_BUDGET_PER_DAY,
+            modelCost,
+          });
+          return;
+        }
+
+        // ── d. Attach cost so controller can pass it to incrementUsage ──────
+        (req as any).modelCost = modelCost;
+
       } else if (type === "pr") {
-        if (currentUsage.pr_count >= LIMITS.FREE.PRS_PER_DAY) {
+        if ((currentUsage.pr_count ?? 0) >= currentLimits.PRS_PER_DAY) {
           res.status(429).json({
-            error: `Daily PR limit reached (${LIMITS.FREE.PRS_PER_DAY}/day).`,
+            error:
+              userPlan === "PRO"
+                ? "Fair use PR limit reached for today."
+                : `Daily PR limit reached (${currentLimits.PRS_PER_DAY}/day). Upgrade to Pro for unmetered PRs!`,
             resetAt: nextResetTime.toISOString(),
           });
           return;
         }
+
       } else if (type === "project_create") {
-        // Check Daily Creations
         if (
-          currentUsage.project_create_count >=
-          LIMITS.FREE.PROJECT_CREATES_PER_DAY
+          (currentUsage.project_create_count ?? 0) >=
+          currentLimits.PROJECT_CREATES_PER_DAY
         ) {
           res.status(429).json({
-            error: `You can only create ${LIMITS.FREE.PROJECT_CREATES_PER_DAY} projects per day.`,
+            error: `You can only create ${currentLimits.PROJECT_CREATES_PER_DAY} workspaces per day on the ${userPlan} plan.`,
             resetAt: nextResetTime.toISOString(),
           });
           return;
         }
 
-        // Check Total Active Projects (Static Limit)
-        // Note: You need to make sure you update 'active_projects_count' when deleting projects too!
-        // Or simply count the rows in the 'projects' table directly here for accuracy:
+        // Total active projects check
         const { count } = await supabase
           .from("projects")
           .select("*", { count: "exact", head: true })
-          .eq("user_id", userId);
+          .eq("user_id", userId)
+          .neq("status", "ARCHIVED");
 
-        if ((count || 0) >= LIMITS.FREE.MAX_ACTIVE_PROJECTS) {
+        if ((count ?? 0) >= currentLimits.MAX_ACTIVE_PROJECTS) {
           res.status(403).json({
-            error: `Max project limit reached (${LIMITS.FREE.MAX_ACTIVE_PROJECTS}). Delete one to create new.`,
+            error: `Max workspace limit reached (${currentLimits.MAX_ACTIVE_PROJECTS} on ${userPlan} plan). Delete an existing workspace to create a new one.`,
           });
           return;
         }
       }
 
-      // 4. Usage is OK -> Attach usage row to req for the next step to increment
+      // ── 4. Passed — attach usage row and proceed ───────────────────────────
       (req as any).usageRow = currentUsage;
       next();
+
     } catch (err) {
-      logger.error("Rate Limit Middleware Exception:", {
-        error: err instanceof Error ? err.message : String(err),
-        userId,
-      });
+      logger.error("Rate Limit Middleware Exception:", err);
       res.status(500).json({ error: "Server error checking limits" });
     }
   };
 };
 
-// Helper to increment counter AFTER success
+// ─── incrementUsage ───────────────────────────────────────────────────────────
+
+/**
+ * Atomically increments the usage counter by `amount` (model cost).
+ * Both the daily counter (chat_count) and the lifetime total (total_chats)
+ * are updated in a single Supabase RPC transaction.
+ *
+ * @param userId  The user's ID
+ * @param type    "chat" | "pr" | "project_create"
+ * @param amount  Cost units to deduct (defaults to 1)
+ */
 export const incrementUsage = async (
   userId: string,
   type: "chat" | "pr" | "project_create",
+  amount = 1,
 ) => {
-  // if (ADMIN_USER_IDS.includes(userId)) return;
   const column =
     type === "chat"
       ? "chat_count"
@@ -193,13 +237,9 @@ export const incrementUsage = async (
         ? "pr_count"
         : "project_create_count";
 
-  // We use a raw RPC or just a simple increment query
-  // Supabase doesn't have a simple "increment" atomic operator via JS client easily without RPC,
-  // but fetching and updating is "okay" for low volume.
-  // For strict atomicity, use this RPC:
-
   await supabase.rpc("increment_usage", {
     user_id_param: userId,
     column_name: column,
+    amount,
   });
 };

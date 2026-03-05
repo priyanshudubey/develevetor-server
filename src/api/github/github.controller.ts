@@ -3,12 +3,8 @@ import { supabase } from "../../config/supabase";
 import { GitHubService } from "../../services/github.service";
 import { incrementUsage } from "../../middlewares/rateLimit.middleware";
 import { decryptToken } from "../../utils/crypto.util";
-
-import { OpenAI } from "openai";
+import { callAI } from "../../services/ai.service";
 import { logger } from "../../config/logger";
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 // Helper to extract raw code from an LLM markdown response
 const extractRawCode = (llmResponse: string = ""): string => {
@@ -43,14 +39,14 @@ ${originalCode}
 ${newSnippet}
   `;
 
-  // Use gpt-4o-mini for this. It is extremely fast, cheap, and perfect for strict formatting tasks.
-  const response = await openai.chat.completions.create({
+  // Always uses gpt-4o-mini for merge — fast, cheap, strict formatting. Not user-configurable.
+  const rawLlmText = await callAI({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: mergePrompt }],
-    temperature: 0.1, // Low temperature ensures it doesn't hallucinate extra code
+    temperature: 0.1,
+    stream: false,
   });
 
-  const rawLlmText = response?.choices[0]?.message.content || "";
   return extractRawCode(rawLlmText);
 };
 

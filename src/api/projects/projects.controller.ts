@@ -405,3 +405,84 @@ export const getFileContent = async (
     res.status(500).json({ error: "Server error retrieving file" });
   }
 };
+
+// ─── Insights Endpoints ───────────────────────────────────────────────────────
+
+export const getProjectInsights = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { id } = req.params;
+  const userId = (req as any).user?.id;
+
+  try {
+    const { data: project } = await supabase
+      .from("projects")
+      .select("id")
+      .eq("id", id)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!project) { res.status(404).json({ error: "Project not found" }); return; }
+
+    const { data, error } = await supabase
+      .from("file_insights")
+      .select("file_path, loc, cyclomatic_complexity, max_nesting_depth, vulnerability_tags, updated_at")
+      .eq("project_id", id)
+      .order("cyclomatic_complexity", { ascending: false });
+
+    if (error) {
+      // Supabase PostgrestError is a plain object — serialize it properly
+      const msg = error.message ?? JSON.stringify(error);
+      logger.warn(`getProjectInsights DB error (table may need migration): ${msg}`, { code: error.code });
+      // Return empty instead of 500 so the UI shows "No insights yet" gracefully
+      res.json({ insights: [] });
+      return;
+    }
+
+    res.json({ insights: data ?? [] });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    logger.error(`getProjectInsights error: ${msg}`);
+    res.status(500).json({ error: `Failed to fetch insights: ${msg}` });
+  }
+};
+
+export const getProjectSummaries = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  const { id } = req.params;
+  const userId = (req as any).user?.id;
+
+  try {
+    const { data: project } = await supabase
+      .from("projects")
+      .select("id")
+      .eq("id", id)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!project) { res.status(404).json({ error: "Project not found" }); return; }
+
+    // Do NOT select 'embedding' — large vector, not needed on client
+    const { data, error } = await supabase
+      .from("file_summaries")
+      .select("file_path, summary_text, file_hash")
+      .eq("project_id", id);
+
+    if (error) {
+      const msg = error.message ?? JSON.stringify(error);
+      logger.warn(`getProjectSummaries DB error (table may need migration): ${msg}`, { code: error.code });
+      res.json({ summaries: [] });
+      return;
+    }
+
+    res.json({ summaries: data ?? [] });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    logger.error(`getProjectSummaries error: ${msg}`);
+    res.status(500).json({ error: `Failed to fetch summaries: ${msg}` });
+  }
+};
+

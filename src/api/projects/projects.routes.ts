@@ -9,6 +9,8 @@ import {
   syncProject,
   getProjectFiles,
   getFileContent,
+  getProjectInsights,
+  getProjectSummaries,
 } from "./projects.controller";
 
 const router = Router();
@@ -23,5 +25,7 @@ router.delete("/:id", deleteProject);
 router.post("/:id/sync", syncProject);
 router.get("/:id/files", getProjectFiles);
 router.get("/:id/file", getFileContent);
+router.get("/:id/insights",  getProjectInsights);
+router.get("/:id/summaries", getProjectSummaries);
 
 export default router;
