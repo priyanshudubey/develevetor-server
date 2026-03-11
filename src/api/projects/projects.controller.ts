@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import axios from "axios";
 import { supabase } from "../../config/supabase";
 import { indexerService } from "../../services/indexer.service";
-import { incrementUsage } from "../../middlewares/rateLimit.middleware";
+import { incrementUsage, releaseProjectCreateLock } from "../../middlewares/rateLimit.middleware";
 import { logger } from "../../config/logger";
 
 // 1. List User's Repos from GitHub (for the selection modal)
@@ -53,7 +53,7 @@ export const listGithubRepos = async (
     logger.error("GitHub API Error:", {
       error: error instanceof Error ? error.message : String(error),
     });
-    res.status(500).json({ error: "Failed to fetch repositories" });
+    res.status(500).json({ error: "We were unable to load your GitHub repositories. Please refresh the page." });
   }
 };
 
@@ -87,7 +87,7 @@ export const syncProject = async (
 
     if (!user?.github_token) {
       // Fail early so we don't accidentally wipe their existing vectors!
-      res.status(403).json({ error: "GitHub token missing. Cannot sync." });
+      res.status(403).json({ error: "Your GitHub connection is missing or expired. Please reconnect in settings to sync." });
       return;
     }
 
@@ -123,7 +123,7 @@ export const syncProject = async (
       userId,
       projectId: id,
     });
-    res.status(500).json({ error: "Failed to sync project" });
+    res.status(500).json({ error: "We encountered an issue while syncing your project. Please try again later." });
   }
 };
 
@@ -136,20 +136,30 @@ export const createProject = async (
   const { repoId, name, url, isPrivate } = req.body;
 
   try {
-    // .single() throws an error if it finds 0 rows. .maybeSingle() safely returns null.
-    const { data: existingProject } = await supabase
+    // .maybeSingle() returns an array or single row depending on results. Let's fetch all potentials to check statuses.
+    const { data: existingProjects } = await supabase
       .from("projects")
       .select("*")
       .eq("user_id", userId)
-      .eq("github_repo_id", repoId.toString())
-      .maybeSingle();
+      .or(`url.eq.${url},github_repo_id.eq.${repoId.toString()}`);
 
-    if (existingProject) {
-      // It exists! Just un-archive it. Zero AI cost.
+    if (existingProjects && existingProjects.length > 0) {
+      // Check if any of the matches are active
+      const activeProject = existingProjects.find(p => p.status !== "ARCHIVED");
+      
+      if (activeProject) {
+        res.status(409).json({ error: "You have already imported this project." });
+        // Make sure to release the lock!
+        await releaseProjectCreateLock(userId);
+        return;
+      }
+
+      // If we reach here, a project exists but is ARCHIVED. Restore the first one found.
+      const archivedProject = existingProjects[0];
       const { data: restoredProject, error: restoreError } = await supabase
         .from("projects")
         .update({ status: "READY", name })
-        .eq("id", existingProject.id)
+        .eq("id", archivedProject.id)
         .select()
         .single();
 
@@ -206,7 +216,10 @@ export const createProject = async (
       error: error instanceof Error ? error.message : String(error),
       userId,
     });
-    res.status(500).json({ error: "Failed to create project" });
+    res.status(500).json({ error: "We couldn't initiate the project import. Please try again." });
+  } finally {
+    // ALWAYS release the lock!
+    await releaseProjectCreateLock(userId);
   }
 };
 
@@ -225,7 +238,7 @@ export const getMyProjects = async (
     .order("created_at", { ascending: false });
 
   if (error) {
-    res.status(500).json({ error: "Failed to fetch projects" });
+    res.status(500).json({ error: "We couldn't load your active projects. Please refresh the page." });
     return;
   }
 
@@ -254,7 +267,7 @@ export const deleteProject = async (
       error: error instanceof Error ? error.message : String(error),
       userId,
     });
-    res.status(500).json({ error: "Failed to delete project" });
+    res.status(500).json({ error: "We couldn't archive the project right now. Please try again later." });
   }
 };
 
@@ -292,7 +305,7 @@ export const getProjectFiles = async (
       error: error instanceof Error ? error.message : String(error),
       projectId: id,
     });
-    res.status(500).json({ error: "Failed to search files" });
+    res.status(500).json({ error: "We encountered an error while searching your project's files." });
   }
 };
 
@@ -402,7 +415,7 @@ export const getFileContent = async (
       projectId: id,
       path,
     });
-    res.status(500).json({ error: "Server error retrieving file" });
+    res.status(500).json({ error: "We couldn't retrieve the contents of this file. It may be too large or unavailable." });
   }
 };
 
@@ -444,7 +457,7 @@ export const getProjectInsights = async (
   } catch (err) {
     const msg = err instanceof Error ? err.message : JSON.stringify(err);
     logger.error(`getProjectInsights error: ${msg}`);
-    res.status(500).json({ error: `Failed to fetch insights: ${msg}` });
+    res.status(500).json({ error: "We couldn't load the complexity insights for this project." });
   }
 };
 
@@ -482,7 +495,7 @@ export const getProjectSummaries = async (
   } catch (err) {
     const msg = err instanceof Error ? err.message : JSON.stringify(err);
     logger.error(`getProjectSummaries error: ${msg}`);
-    res.status(500).json({ error: `Failed to fetch summaries: ${msg}` });
+    res.status(500).json({ error: "We couldn't load the file summaries for this project." });
   }
 };
 

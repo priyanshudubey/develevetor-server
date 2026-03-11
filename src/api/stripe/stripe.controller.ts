@@ -41,7 +41,7 @@ export const createCheckoutSession = async (
   } catch (error: any) {
     // console.error("❌ RAW STRIPE ERROR:", error.message);
     logger.error("Stripe Checkout Error:", error.message);
-    res.status(500).json({ error: "Failed to create checkout session" });
+    res.status(500).json({ error: "We couldn't initiate the Stripe checkout. Please try again later." });
   }
 };
 
@@ -156,6 +156,6 @@ export const createPortalSession = async (
     res.json({ url: portalSession.url });
   } catch (error: any) {
     logger.error("Stripe Portal Error:", error.message);
-    res.status(500).json({ error: "Failed to create portal session" });
+    res.status(500).json({ error: "We couldn't open the billing portal. Please try again later." });
   }
 };

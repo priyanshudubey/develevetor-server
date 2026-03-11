@@ -32,7 +32,7 @@ export const getPreferences = async (
     });
   } catch (error: any) {
     logger.error("Fetch Preferences Error:", error);
-    res.status(500).json({ error: "Failed to fetch preferences" });
+    res.status(500).json({ error: "We couldn't load your preferences. Please refresh the page." });
   }
 };
 
@@ -57,7 +57,7 @@ export const updatePreferences = async (
     res.json({ success: true });
   } catch (error: any) {
     logger.error("Update Preferences Error:", error);
-    res.status(500).json({ error: "Failed to update preferences" });
+    res.status(500).json({ error: "We encountered an issue saving your preferences. Please try again." });
   }
 };
 
@@ -92,7 +92,7 @@ export const updateGithubToken = async (
     res.json({ success: true });
   } catch (error: any) {
     logger.error("Vault GitHub Token Error:", error);
-    res.status(500).json({ error: "Failed to securely save token" });
+    res.status(500).json({ error: "We couldn't securely save your GitHub token. Please try again." });
   }
 };
 
@@ -115,7 +115,7 @@ export const getIntegrationStatus = async (
     res.json({ hasGithubToken: !!data?.github_token });
   } catch (error: any) {
     logger.error("Check Integration Error:", error);
-    res.status(500).json({ error: "Failed to check integrations" });
+    res.status(500).json({ error: "We temporarily lost connection to your integrations. Please try again." });
   }
 };
 
@@ -162,6 +162,6 @@ export const getUsageStats = async (
     });
   } catch (error) {
     logger.error("Fetch Usage Error:", error);
-    res.status(500).json({ error: "Failed to fetch usage statistics" });
+    res.status(500).json({ error: "We couldn't load your usage statistics. Please refresh the page." });
   }
 };

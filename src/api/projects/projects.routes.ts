@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../../middlewares/auth.middleware";
-import { checkRateLimit } from "../../middlewares/rateLimit.middleware";
+import { checkRateLimit, strictRateLimit } from "../../middlewares/rateLimit.middleware";
 import {
   listGithubRepos,
   createProject,
@@ -17,6 +17,7 @@ const router = Router();
 
 // All routes require login
 router.use(requireAuth);
+router.use(strictRateLimit);
 
 router.get("/github-repos", listGithubRepos); // Get list from GitHub
 router.get("/", getMyProjects); // Get my imported projects

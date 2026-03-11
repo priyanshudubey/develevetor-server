@@ -88,7 +88,7 @@ export const createOrder = async (
   } catch (error: unknown) {
     const msg = razorpayErrorMessage(error);
     logger.error(`Razorpay createOrder error: ${msg}`, { raw: error });
-    res.status(500).json({ error: `Payment order failed: ${msg}` });
+    res.status(500).json({ error: "We couldn't initiate the payment order. Please try again." });
   }
 };
 
@@ -134,7 +134,7 @@ export const verifyPayment = async (
 
     if (updateError) {
       logger.error("Supabase upgrade failed:", updateError.message);
-      res.status(500).json({ error: "Failed to upgrade account" });
+      res.status(500).json({ error: "Your payment was successful, but we encountered an issue upgrading your account. Please contact support." });
       return;
     }
 
@@ -149,7 +149,7 @@ export const verifyPayment = async (
   } catch (error: unknown) {
     const msg = razorpayErrorMessage(error);
     logger.error(`verifyPayment error: ${msg}`, { raw: error });
-    res.status(500).json({ error: "Payment verification failed" });
+    res.status(500).json({ error: "We couldn't verify your payment. If you were charged, please contact support." });
   }
 };
 
@@ -173,6 +173,6 @@ export const cancelSubscription = async (
   } catch (error: unknown) {
     const msg = razorpayErrorMessage(error);
     logger.error(`cancelSubscription error: ${msg}`, { raw: error });
-    res.status(500).json({ error: "Failed to cancel subscription" });
+    res.status(500).json({ error: "We couldn't process your cancellation request right now. Please try again later." });
   }
 };

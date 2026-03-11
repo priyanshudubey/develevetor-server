@@ -26,7 +26,7 @@ export const getChatHistory = async (
       error: error instanceof Error ? error.message : String(error),
       userId: (req as any).user?.id,
     });
-    res.status(500).json({ error: "Failed to fetch history" });
+    res.status(500).json({ error: "We couldn't load your chat history at this moment. Please refresh the page." });
   }
 };
 
@@ -71,12 +71,18 @@ const generateFileTree = (paths: string[]) => {
 // 2. CHAT WITH PROJECT (RAG + Context Injection)
 // ... your existing imports and generateFileTree helper ...
 
+console.log("👉 FILE LOADED: chat.controller.ts");
+
 export const chatWithProject = async (
   req: Request,
   res: Response,
 ): Promise<void> => {
+  console.log("👉 FUNCTION EXECUTED: chatWithProject");
   const { projectId, message, selectedFiles } = req.body;
   const userId = (req as any).user?.id;
+  
+  let userMsgId: string | undefined;
+  console.log("👉 FUNCTION EXECUTED: chatWithProject");
 
   try {
     // 0. Increment usage proportional to model cost (set by checkRateLimit middleware)
@@ -105,11 +111,18 @@ export const chatWithProject = async (
     }
 
     // 1. Save USER message immediately
-    await supabase.from("chat_messages").insert({
-      project_id: projectId,
-      role: "user",
-      content: message,
-    });
+    const { data: userMsg, error: insertError } = await supabase
+      .from("chat_messages")
+      .insert({
+        project_id: projectId,
+        role: "user",
+        content: message,
+      })
+      .select("id")
+      .single();
+
+    if (insertError) throw insertError;
+    userMsgId = userMsg.id;
 
     // --- STEP A: Fetch File Map (The "Brain") ---
     const { data: filePaths } = await supabase
@@ -155,15 +168,26 @@ export const chatWithProject = async (
     }
 
     // --- STEP C: Vector Search (The "Specifics") ---
-    // Always use lightweight embedding model regardless of user chat model choice
-    const queryVector = await getEmbedding(message);
+    // Bypass vector search if it's a general architecture question with no specific files selected.
+    const isGeneralArchitectureQuery =
+      (!selectedFiles || selectedFiles.length === 0) &&
+      /explain this repo|architecture|overview|how does this work/i.test(
+        message,
+      );
 
-    const { data: vectorDocs } = await supabase.rpc("match_documents", {
-      query_embedding: queryVector,
-      match_threshold: 0.1,
-      match_count: 5,
-      filter_project_id: projectId,
-    });
+    let vectorDocs: any[] = [];
+    if (!isGeneralArchitectureQuery) {
+      // Always use lightweight embedding model regardless of user chat model choice
+      const queryVector = await getEmbedding(message);
+
+      const { data } = await supabase.rpc("match_documents", {
+        query_embedding: queryVector,
+        match_threshold: 0.1,
+        match_count: 5,
+        filter_project_id: projectId,
+      });
+      vectorDocs = data || [];
+    }
 
     // --- STEP D: Combine & Deduplicate Context ---
     const allDocs = [...explicitDocs, ...(vectorDocs || [])];
@@ -181,16 +205,46 @@ export const chatWithProject = async (
       .map((doc: any) => `\n--- FILE: ${doc.metadata.path} ---\n${doc.content}`)
       .join("\n");
 
+    // 🆕 GOD-MODE SYSTEM MAP FETCH
+    let systemMapText = "";
+    const needsSystemMap = /explain|documentation|architecture|repo/i.test(message);
+    if (needsSystemMap) {
+      const { data: summaries } = await supabase
+        .from("file_summaries")
+        .select("file_path, summary")
+        .eq("project_id", projectId)
+        .limit(2000);
+
+      if (summaries && summaries.length > 0) {
+        systemMapText = summaries
+          .map((s: any) => `[${s.file_path}]: ${s.summary}`)
+          .join("\n");
+      }
+    }
+
+    console.log("=== SYSTEM MAP CHECK ===");
+console.log(systemMapText ? `✅ Map Loaded! Length: ${systemMapText.length} chars` : "❌ Map is EMPTY!");
+if (systemMapText) {
+  console.log("Preview:", systemMapText.substring(0, 150));
+}
+
     // 🆕 INJECT USER INSTRUCTIONS INTO SYSTEM PROMPT
     const systemPrompt = `
 You are an expert Senior Software Engineer and Technical Lead. 
-You have a full map of the codebase and access to specific file contents. Your goal is to provide production-ready code, deep technical insights, and high-level architectural understanding.
+You have a full map of the codebase and access to specific file contents. Your goal is to provide production-ready code, deep technical insights, and high-level architectural understanding, explain the provided codebase architecture, data flow, and business logic.
 
 **PROJECT ARCHITECTURE (File Tree):**
 ${fileStructure}
-
+${systemMapText ? `\n**COMPLETE SYSTEM MAP (File Summaries):**\n${systemMapText}\n` : ""}
 **AVAILABLE CODE CONTEXT:**
 ${contextText}
+
+
+**STRICT RULES:**
+1. NO GENERIC DEFINITIONS: Do NOT explain what Node.js, Express, React, MySQL, or JWT are. The user already knows.
+2. NO TAUTOLOGIES: Do NOT say 'userController manages users' or 'db.js configures the database'. That is useless.
+3. FOCUS ON LOGIC & FLOW: Explain how things work. How is the JWT constructed? What middleware intercepts requests? What are the core database entities interacting in the controllers?
+4. IDENTIFY THE 'GHOSTS': Point out complex areas, potential tech debt, or non-obvious logic (e.g., 'The logisticsController seems to handle both shipping and vendor assignment, which might be a tightly coupled bottleneck.').
 
 **CORE BEHAVIORS & METHODOLOGY:**
 1. Analyze First: Always use the "File Tree" to infer the tech stack, domain boundaries, and architecture before answering.
@@ -215,11 +269,12 @@ ${contextText}
 Choose the appropriate structure based on the user's prompt:
 
 *IF THE USER ASKS FOR A REPOSITORY/PROJECT EXPLANATION:*
-- **High-Level Purpose:** What this application likely does based on its naming and structure.
-- **Inferred Tech Stack:** The frameworks, languages, and tools being used.
-- **Architecture Breakdown:** A clear explanation of what the key directories handle (e.g., "The \`/api\` folder manages backend routes, while \`/services\` handles business logic").
-- **Key Workflows:** How data likely moves through the system.
-- **Where to Start:** The 2-3 most important files the user should look at to understand the core logic.
+- **10,000-Foot View:** (Max 3 sentences). The core business purpose of the app. Do NOT list the tech stack here.
+- Use the COMPLETE SYSTEM MAP to understand how the entire application interconnects. Write a comprehensive, multi-section Documentation Guide that connects the dots between different domains (e.g., how the routes connect to specific controllers based on the summaries).
+- **Architecture Diagram:** You MUST include a \`\`\`mermaid\`\`\` code block containing a flowchart (graph TD) that maps the core data flow (e.g., Client -> Router -> specific Middleware -> core Controllers -> Database).
+- **Core Data Flow & Authentication:** Explain the exact journey of a request. How is the token verified? What database entities interact in the primary controllers? (e.g., "Requests hit authMiddleware which validates a bcrypt-hashed JWT before passing context to the inventoryController...").
+- **Architectural Quirks & Tech Debt:** Identify complex areas, tightly coupled modules, or non-obvious logic based on the file contents.
+- **Critical Execution Paths:** Name the 2-3 specific files where the heaviest business logic lives, and explain *why* they are the most critical.
 
 *IF THE USER ASKS A SPECIFIC CODING/DEBUGGING QUESTION:*
 - **TL;DR / Overview:** A 1-2 sentence summary of the solution.
@@ -228,6 +283,13 @@ Choose the appropriate structure based on the user's prompt:
 - **Next Steps:** What the user should test or do next.
 ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\n${userInstructions}` : ""}
 `;
+
+console.log("=== SYSTEM PROMPT CHECK ===");
+console.log(systemPrompt.includes("10,000-Foot View") ? "✅ New Prompt Active" : "❌ Old Prompt Active");
+
+console.log("=== CONTEXT SIZE CHECK ===");
+console.log(`Sending ${uniqueDocs.length} files to AI.`);
+console.log("Files included in context:", sources);
 
     // --- STEP E: Stream Response via ai.service router ---
     // callAIStream uses callbacks to unify OpenAI / Anthropic / Google streams
@@ -248,6 +310,13 @@ ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\
       });
     });
 
+    console.log("=== SYSTEM PROMPT CHECK ===");
+console.log(systemPrompt.includes("10,000-Foot View") ? "✅ New Prompt Active" : "❌ Old Prompt Active");
+
+console.log("=== CONTEXT SIZE CHECK ===");
+console.log(`Sending ${uniqueDocs.length} files to AI.`);
+console.log("Files included in context:", sources);
+
     // Save Assistant Message
     await supabase.from("chat_messages").insert({
       project_id: projectId,
@@ -258,6 +327,15 @@ ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\
 
     res.end();
   } catch (error) {
+    // 3. Database Rollback - Delete the initial user message if the stream completely fails
+    if (userMsgId) {
+      try {
+        await supabase.from("chat_messages").delete().eq("id", userMsgId);
+      } catch (err: any) {
+        logger.error("Failed to rollback user message:", { error: err.message, userMsgId });
+      }
+    }
+
     const isAIError = error instanceof AIError;
     logger.error("Chat Error:", {
       error: error instanceof Error ? error.message : String(error),
@@ -269,8 +347,10 @@ ${userInstructions ? `\n**USER'S PERSONALIZED CODING INSTRUCTIONS (CRITICAL):**\
       const status = isAIError && error.code === "rate_limit" ? 429
                    : isAIError && error.code === "auth"       ? 401
                    : 500;
-      res.status(status).json({ error: isAIError ? error.message : "Failed to generate answer" });
+      res.status(status).json({ error: isAIError ? error.message : "We encountered an issue while generating an answer. Please try asking your question again." });
     } else {
+      // 2. Mid-Stream Error Handling
+      res.write("\n\n[ERROR: The AI connection dropped mid-response. Please try again.]");
       res.end();
     }
   }

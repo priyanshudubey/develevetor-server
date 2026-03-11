@@ -61,6 +61,6 @@ export const getDashboardData = async (
     });
   } catch (error: any) {
     logger.error("Dashboard Fetch Error:", error);
-    res.status(500).json({ error: "Failed to load dashboard data" });
+    res.status(500).json({ error: "We encountered an issue loading your dashboard. Please refresh the page." });
   }
 };

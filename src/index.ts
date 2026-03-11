@@ -12,6 +12,7 @@ import githubRoutes from "./api/github/github.routes";
 import usersRoutes from "./api/users/users.routes";
 import dashboardRoutes from "./api/dashboard/dashboard.routes";
 import razorpayRoutes from "./api/razorpay/razorpay.routes";
+import webhooksRoutes from "./api/webhooks/webhooks.routes";
 import { logger } from "./config/logger";
 
 dotenv.config();
@@ -23,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: [process.env.CLIENT_URL as string],
     credentials: true,
     exposedHeaders: ["x-sources"],
   }),
@@ -41,6 +42,7 @@ app.use("/api/github", githubRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/razorpay", razorpayRoutes);
+app.use("/api/webhooks", webhooksRoutes);
 app.get("/", (req: Request, res: Response) => {
   res.json({
     status: "success",

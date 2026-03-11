@@ -217,7 +217,7 @@ export const createPullRequest = async (
         .status(422)
         .json({ error: "Validation failed. PR might already exist." });
     } else {
-      res.status(500).json({ error: "Failed to create PR: " + error.message });
+      res.status(500).json({ error: "We couldn't open the pull request. Please verify your repository permissions and try again." });
     }
   }
 };

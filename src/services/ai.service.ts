@@ -229,8 +229,12 @@ function translateError(provider: Provider, raw: unknown): AIError {
 function requireKey(envVar: string, modelId: string): string {
   const key = process.env[envVar];
   if (!key) {
-    aiLog("warn", `Missing ${FX.cyan(envVar)} — falling back to ${FX.violet(DEFAULT_MODEL)}`);
-    return process.env.OPENAI_API_KEY ?? "";
+    const provider = MODEL_CONFIGS[modelId]?.provider || "unknown";
+    throw new AIError(
+      provider as Provider,
+      "auth",
+      `Missing API Key for ${modelId}. Please set ${envVar} in your environment variables.`,
+    );
   }
   return key;
 }
@@ -300,6 +304,7 @@ export async function callAI(options: CallAIOptions): Promise<string> {
 // ─── Streaming ────────────────────────────────────────────────────────────────
 
 export async function callAIStream(options: CallAIStreamOptions): Promise<void> {
+  console.log("👉 FUNCTION EXECUTED: callAIStream");
   const { id: resolvedId, config } = resolveConfig(options.model);
   const trimmed = trimMessages(options.messages, resolvedId);
 
@@ -481,7 +486,12 @@ function toGoogleContents(messages: AIMessage[]): { role: string; parts: { text:
 // ─── Embedding (always OpenAI) ────────────────────────────────────────────────
 
 export async function getEmbedding(text: string): Promise<number[]> {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new AIError("openai", "auth", "Missing OPENAI_API_KEY required for vector embeddings.");
+  }
+  
+  const client = new OpenAI({ apiKey });
   const response = await client.embeddings.create({
     model: "text-embedding-3-small",
     input: text,

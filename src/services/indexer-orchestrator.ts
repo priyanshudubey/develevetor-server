@@ -117,7 +117,7 @@ export class IndexerOrchestrator {
     const astMetrics = analyzeFile(content, filePath);
 
     // ── Track 3: Security Audit (always) ─────────────────────────────────────
-    const { tags: vulnerabilityTags } = auditFile(content, filePath);
+    const { tags: vulnerabilityTags } = await auditFile(content, filePath);
 
     // ── Upsert file_insights ──────────────────────────────────────────────────
     // Delete any existing row for this file first (no unique constraint on project_id+file_path)

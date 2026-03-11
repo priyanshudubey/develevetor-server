@@ -25,7 +25,7 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
   const code = req.query.code as string;
 
   if (!code) {
-    res.status(400).send("No code provided by GitHub");
+    res.status(400).send("GitHub login failed because no authorization code was securely provided. Please try logging in again.");
     return;
   }
 
@@ -99,7 +99,7 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect("http://localhost:5173/dashboard");
+    res.redirect(`${process.env.CLIENT_URL}/dashboard`);
   } catch (error: any) {
     // 🌟 ENHANCED LOGGING
     logger.error("Auth Callback Error:", {
@@ -110,7 +110,7 @@ export const callback = async (req: Request, res: Response): Promise<void> => {
     
     // Redirect with a specific error code for the UI
     const errorType = error.code === 'ECONNABORTED' ? 'timeout' : 'auth_failed';
-    res.redirect(`http://localhost:5173?error=${errorType}`);
+    res.redirect(`${process.env.CLIENT_URL}?error=${errorType}`);
   }
 };
 
@@ -239,6 +239,6 @@ export const getUserUsage = async (
     });
   } catch (err) {
     logger.error("Get usage error:", err);
-    res.status(500).json({ error: "Failed to fetch usage limits" });
+    res.status(500).json({ error: "Unable to retrieve your current usage limits. Please check again later." });
   }
 };
