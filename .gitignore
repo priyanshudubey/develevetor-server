@@ -3,3 +3,4 @@ temp_repos
 .env
 test_fetch.js
 test_fetch.mjs
+dist/
